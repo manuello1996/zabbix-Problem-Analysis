@@ -138,6 +138,7 @@ class CControllerAnalistProblemPopup extends CController {
 
         // Get related events for timeline
         $related_events = [];
+        $pattern_events = [];
         if ($actual_triggerid > 0) {
             $related_events = API::Event()->get([
                 'output'    => ['eventid', 'clock', 'value', 'acknowledged', 'name', 'severity'],
@@ -176,6 +177,22 @@ class CControllerAnalistProblemPopup extends CController {
             $related_events = array_filter($related_events, function($ev) {
                 return (int)$ev['value'] === 1;
             });
+
+            // Get problem events from the last 12 months for Time Patterns/Heatmap.
+            $pattern_time_till = isset($event['clock']) ? (int)$event['clock'] : time();
+            $pattern_time_from = strtotime('-12 months', $pattern_time_till);
+
+            $pattern_events = API::Event()->get([
+                'output'    => ['eventid', 'clock', 'value', 'acknowledged', 'name', 'severity'],
+                'source'    => 0, // EVENT_SOURCE_TRIGGERS
+                'object'    => 0, // EVENT_OBJECT_TRIGGER
+                'objectids' => $actual_triggerid,
+                'time_from' => $pattern_time_from,
+                'time_till' => $pattern_time_till,
+                'value'     => 1, // Only problem events
+                'sortfield' => 'clock',
+                'sortorder' => 'DESC'
+            ]);
         }
 
         // Get items for graphs - usar itemids do selectItems diretamente
@@ -286,6 +303,7 @@ class CControllerAnalistProblemPopup extends CController {
             'trigger' => $trigger,
             'host' => $host,
             'related_events' => $related_events,
+            'pattern_events' => $pattern_events,
             'items' => $items,
             'monthly_comparison' => $monthly_comparison,
             'system_metrics' => $system_metrics,

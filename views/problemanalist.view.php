@@ -17,6 +17,7 @@ $event = $data['event'] ?? [];
 $trigger = $data['trigger'] ?? null;
 $host = $data['host'] ?? null;
 $related_events = $data['related_events'] ?? [];
+$pattern_events = $data['pattern_events'] ?? [];
 $items = $data['items'] ?? [];
 $monthly_comparison = $data['monthly_comparison'] ?? [];
 $system_metrics = $data['system_metrics'] ?? [];
@@ -423,7 +424,7 @@ for ($h = 0; $h < 24; $h++) {
     $hourly_data[$h] = 0;
 }
 
-foreach ($related_events as $rel_event) {
+foreach ($pattern_events as $rel_event) {
     $hour = date('G', $rel_event['clock']);
     $hourly_data[(int)$hour]++;
 }
@@ -431,13 +432,12 @@ foreach ($related_events as $rel_event) {
 // Calculate weekly distribution
 $weekdays = [_('Sunday'), _('Monday'), _('Tuesday'), _('Wednesday'), _('Thursday'), _('Friday'), _('Saturday')];
 $weekly_data = [0, 0, 0, 0, 0, 0, 0];
-$pattern_events = $related_events;
 $weekly_hourly_details = array_fill(0, 7, array_fill(0, 24, 0));
 $monthly_data = [];
 $month_keys = [];
 $monthly_daily_details = [];
 
-$current_time = time();
+$current_time = isset($event['clock']) ? (int) $event['clock'] : time();
 for ($i = 11; $i >= 0; $i--) {
     $ts = strtotime("-$i months", $current_time);
     $mk = date('Y-m', $ts);
@@ -458,7 +458,7 @@ for ($h = 0; $h < 24; $h++) {
         : (zbx_date2str('H', $ts_utc, 'UTC') . _x('h', 'hour short'));
 }
 
-foreach ($related_events as $rel_event) {
+foreach ($pattern_events as $rel_event) {
     $weekday = date('w', $rel_event['clock']);
     $weekly_data[(int)$weekday]++;
 
