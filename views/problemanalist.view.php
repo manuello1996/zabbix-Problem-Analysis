@@ -139,7 +139,7 @@ function createOperationalDataSection(array $operational_data): CDiv {
 
     if (is_string($opdata) && trim($opdata) !== '') {
         $table = new CTableInfo();
-        $table->setHeader([_('Operational data')]);
+        $table->setHeader([_('Operational Data')]);
         $table->addRow([(new CCol($opdata))->addClass(ZBX_STYLE_WORDBREAK)]);
         $section->addItem($table);
 
@@ -148,7 +148,10 @@ function createOperationalDataSection(array $operational_data): CDiv {
 
     $history = $operational_data['history'] ?? [];
     $table = new CTableInfo();
-    $table->setHeader([_('Item'), _('Latest 3 values')]);
+    $table->setHeader([
+        (new CColHeader(_('Item')))->addStyle('width: 30%;'),
+        (new CColHeader(_('Latest 3 Values')))->addStyle('width: 70%;')
+    ]);
 
     if (!$history) {
         $table->addRow([_('No operational data or item history available'), '']);
@@ -168,9 +171,10 @@ function createOperationalDataSection(array $operational_data): CDiv {
                 : _('N/A');
 
             $value_lines[] = (new CDiv([
-                (new CSpan($clock))->addClass('grey'),
-                new CSpan(' - '),
-                (new CSpan(formatAnalistHistoryValue($value['value'] ?? '', $item)))->addClass(ZBX_STYLE_WORDBREAK)
+                (new CSpan($clock))->addClass('grey')->addClass('operational-history-clock'),
+                (new CSpan(formatAnalistHistoryValue($value['value'] ?? '', $item)))
+                    ->addClass(ZBX_STYLE_WORDBREAK)
+                    ->addClass('operational-history-data')
             ]))->addClass('operational-history-value');
         }
 
@@ -179,8 +183,12 @@ function createOperationalDataSection(array $operational_data): CDiv {
         }
 
         $table->addRow([
-            (new CCol($item['name'] ?? $item['key_'] ?? _('Unknown item')))->addClass(ZBX_STYLE_WORDBREAK),
-            (new CCol($value_lines))->addClass(ZBX_STYLE_WORDBREAK)
+            (new CCol($item['name'] ?? $item['key_'] ?? _('Unknown item')))
+                ->addClass(ZBX_STYLE_WORDBREAK)
+                ->addStyle('width: 30%;'),
+            (new CCol($value_lines))
+                ->addClass(ZBX_STYLE_WORDBREAK)
+                ->addStyle('width: 70%;')
         ]);
     }
 
@@ -433,7 +441,7 @@ if ($metrics_section || (!empty($monthly_comparison) && !empty($monthly_comparis
 
 $problem_detail_section = new CDiv();
 $problem_detail_section->addClass('problem-detail-section');
-$problem_detail_section->addItem(new CTag('h4', false, _('Problem detail')));
+$problem_detail_section->addItem(new CTag('h4', false, _('Problem Detail')));
 $problem_detail_section->addItem($overview_table);
 $overview_container->addItem($problem_detail_section);
 
@@ -482,7 +490,7 @@ if ($host && is_array($host)) {
         $secondary_sections[] = makeAnalistHostSectionTemplates($host['templates']);
     }
 
-    if (!empty($host['inventory'])) {
+    if (!empty($host['inventory']) && hasAnalistHostInventoryData($host['inventory'], [])) {
         $secondary_sections[] = makeAnalistHostSectionInventoryCompact($host['hostid'], $host['inventory'], []);
     }
 
@@ -543,6 +551,7 @@ $tabs->addTab('host', _('Host Info'), $host_div);
 
 // TAB 3: Event Timeline
 $timeline_div = new CDiv();
+$timeline_div->addClass('timeline-tab');
 
 $timeline_comparison_section = createMonthlyComparisonSection($overview_monthly_comparison);
 if ($timeline_comparison_section !== null) {
@@ -564,7 +573,7 @@ $allowed = [
 $timeline_table = make_small_eventlist($event, $allowed);
 
 // Add header
-$timeline_div->addItem(new CTag('h4', false, _('Event list [previous 20]')));
+$timeline_div->addItem(new CTag('h4', false, _('Recent Events')));
 $timeline_div->addItem($timeline_table);
 $tabs->addTab('timeline', _('Timeline'), $timeline_div);
 
@@ -2570,117 +2579,105 @@ function makeAnalistHostSectionMonitoring(string $hostid, int $dashboard_count, 
     $can_view_monitoring_hosts = CWebUser::checkAccess(CRoleHelper::UI_MONITORING_HOSTS);
     $can_view_problems = CWebUser::checkAccess(CRoleHelper::UI_MONITORING_PROBLEMS);
     $can_configure_hosts = CWebUser::checkAccess(CRoleHelper::UI_CONFIGURATION_HOSTS);
+    $actions = [];
+
+    $make_action = static function ($label, $url, ?int $count = null, string $title = '') {
+        $content = [$label];
+
+        if ($count !== null) {
+            $content[] = (new CSpan($count))
+                ->addClass(ZBX_STYLE_ENTITY_COUNT)
+                ->addClass('monitoring-action-count')
+                ->setTitle($count);
+        }
+
+        $action = $url !== null
+            ? new CLink($content, $url)
+            : new CSpan($content);
+
+        $action->addClass('monitoring-action');
+
+        if ($title !== '') {
+            $action->setTitle($title);
+        }
+
+        return $action;
+    };
+
+    if ($can_view_problems && $problem_total > 0) {
+        $actions[] = $make_action(_('Problems'),
+            (new CUrl('zabbix.php'))
+                ->setArgument('action', 'problem.view')
+                ->setArgument('hostids', [$hostid])
+                ->setArgument('filter_set', '1'),
+            $problem_total,
+            _('Problems')
+        );
+    }
+
+    if ($can_view_monitoring_hosts && $dashboard_count > 0) {
+        $actions[] = $make_action(_('Dashboards'),
+            (new CUrl('zabbix.php'))
+                ->setArgument('action', 'host.dashboard.view')
+                ->setArgument('hostid', $hostid),
+            $dashboard_count,
+            _('Dashboards')
+        );
+    }
+
+    if ($can_view_monitoring_hosts && $graph_count > 0) {
+        $actions[] = $make_action(_('Graphs'),
+            (new CUrl('zabbix.php'))
+                ->setArgument('action', 'charts.view')
+                ->setArgument('filter_hostids', [$hostid])
+                ->setArgument('filter_show', GRAPH_FILTER_HOST)
+                ->setArgument('filter_set', '1'),
+            $graph_count,
+            _('Graphs')
+        );
+    }
+
+    if (CWebUser::checkAccess(CRoleHelper::UI_MONITORING_LATEST_DATA) && $item_count > 0) {
+        $actions[] = $make_action(_('Latest Data'),
+            (new CUrl('zabbix.php'))
+                ->setArgument('action', 'latest.view')
+                ->setArgument('hostids', [$hostid])
+                ->setArgument('filter_set', '1'),
+            $item_count,
+            _('Latest Data')
+        );
+    }
+
+    if ($can_view_monitoring_hosts && $web_scenario_count > 0) {
+        $actions[] = $make_action(_('Web'),
+            (new CUrl('zabbix.php'))
+                ->setArgument('action', 'web.view')
+                ->setArgument('filter_hostids', [$hostid])
+                ->setArgument('filter_set', '1'),
+            $web_scenario_count,
+            _('Web scenarios')
+        );
+    }
+
+    if ($can_configure_hosts) {
+        $actions[] = $make_action(_('Configuration'),
+            (new CUrl('zabbix.php'))
+                ->setArgument('action', 'host.edit')
+                ->setArgument('hostid', $hostid),
+            null,
+            _('Host Configuration')
+        );
+    }
+
+    if (!$actions) {
+        $actions[] = (new CSpan(_('No direct actions available')))->addClass(ZBX_STYLE_DISABLED);
+    }
 
     return (new CDiv([
         (new CDiv(_('Monitoring')))->addClass('analisthost-section-name'),
-        (new CDiv([
-            (new CDiv([
-                $can_view_problems
-                    ? (new CLink(_('Problems'),
-                        (new CUrl('zabbix.php'))
-                            ->setArgument('action', 'problem.view')
-                            ->setArgument('hostids', [$hostid])
-                            ->setArgument('filter_set', '1')
-                    ))
-                        ->addClass('monitoring-item-name')
-                        ->setTitle(_('Problems'))
-                    : (new CSpan(_('Problems')))
-                        ->addClass('monitoring-item-name')
-                        ->setTitle(_('Problems')),
-                (new CSpan($problem_total))
-                    ->addClass(ZBX_STYLE_ENTITY_COUNT)
-                    ->addClass('monitoring-item-span')
-                    ->setTitle($problem_total)
-            ]))->addClass('monitoring-item'),
-            (new CDiv([
-                $can_view_monitoring_hosts && $dashboard_count > 0
-                    ? (new CLink(_('Dashboards'),
-                        (new CUrl('zabbix.php'))
-                            ->setArgument('action', 'host.dashboard.view')
-                            ->setArgument('hostid', $hostid)
-                    ))
-                        ->addClass('monitoring-item-name')
-                        ->setTitle(_('Dashboards'))
-                    : (new CSpan(_('Dashboards')))
-                        ->addClass('monitoring-item-name')
-                        ->setTitle(_('Dashboards')),
-                (new CSpan($dashboard_count))
-                    ->addClass(ZBX_STYLE_ENTITY_COUNT)
-                    ->addClass('monitoring-item-span')
-                    ->setTitle($dashboard_count)
-            ]))->addClass('monitoring-item'),
-            (new CDiv([
-                $can_view_monitoring_hosts && $graph_count > 0
-                    ? (new CLink(_('Graphs'),
-                        (new CUrl('zabbix.php'))
-                            ->setArgument('action', 'charts.view')
-                            ->setArgument('filter_hostids', [$hostid])
-                            ->setArgument('filter_show', GRAPH_FILTER_HOST)
-                            ->setArgument('filter_set', '1')
-                    ))
-                        ->addClass('monitoring-item-name')
-                        ->setTitle(_('Graphs'))
-                    : (new CSpan(_('Graphs')))
-                        ->addClass('monitoring-item-name')
-                        ->setTitle(_('Graphs')),
-                (new CSpan($graph_count))
-                    ->addClass(ZBX_STYLE_ENTITY_COUNT)
-                    ->addClass('monitoring-item-span')
-                    ->setTitle($graph_count)
-            ]))->addClass('monitoring-item'),
-            (new CDiv([
-                CWebUser::checkAccess(CRoleHelper::UI_MONITORING_LATEST_DATA) && $item_count > 0
-                    ? (new CLink(_('Latest data'),
-                        (new CUrl('zabbix.php'))
-                            ->setArgument('action', 'latest.view')
-                            ->setArgument('hostids', [$hostid])
-                            ->setArgument('filter_set', '1')
-                    ))
-                        ->addClass('monitoring-item-name')
-                        ->setTitle(_('Latest data'))
-                    : (new CSpan(_('Latest data')))
-                        ->addClass('monitoring-item-name')
-                        ->setTitle(_('Latest data')),
-                (new CSpan($item_count))
-                    ->addClass(ZBX_STYLE_ENTITY_COUNT)
-                    ->addClass('monitoring-item-span')
-                    ->setTitle($item_count)
-            ]))->addClass('monitoring-item'),
-            (new CDiv([
-                $can_view_monitoring_hosts && $web_scenario_count > 0
-                    ? (new CLink(_('Web'),
-                        (new CUrl('zabbix.php'))
-                            ->setArgument('action', 'web.view')
-                            ->setArgument('filter_hostids', [$hostid])
-                            ->setArgument('filter_set', '1')
-                    ))
-                        ->addClass('monitoring-item-name')
-                        ->setTitle(_('Web scenarios'))
-                    : (new CSpan(_('Web')))
-                        ->addClass('monitoring-item-name')
-                        ->setTitle(_('Web scenarios')),
-                (new CSpan($web_scenario_count))
-                    ->addClass(ZBX_STYLE_ENTITY_COUNT)
-                    ->addClass('monitoring-item-span')
-                    ->setTitle($web_scenario_count)
-            ]))->addClass('monitoring-item'),
-            (new CDiv([
-                $can_configure_hosts
-                    ? (new CLink(_('Configuration'),
-                        (new CUrl('zabbix.php'))
-                            ->setArgument('action', 'host.edit')
-                            ->setArgument('hostid', $hostid)
-                    ))
-                        ->addClass('monitoring-item-name')
-                        ->setTitle(_('Host configuration'))
-                    : (new CSpan(_('Configuration')))
-                        ->addClass('monitoring-item-name')
-                        ->setTitle(_('Host configuration')),
-                ''
-            ]))->addClass('monitoring-item')
-        ]))
+        (new CDiv($actions))
             ->addClass('analisthost-section-body')
-            ->addClass('monitoring')
+            ->addClass('monitoring-actions')
     ]))
         ->addClass('analisthost-section')
         ->addClass('section-monitoring');
@@ -2861,6 +2858,22 @@ function makeAnalistHostSectionTemplates(array $host_templates): CDiv {
         ->addClass('analisthost-section')
         ->addClass('section-templates')
         ->addStyle('max-width: 100%; overflow: hidden;');
+}
+
+function hasAnalistHostInventoryData(array $host_inventory, array $inventory_fields): bool {
+    foreach (getHostInventories() as $inventory) {
+        $db_field = $inventory['db_field'];
+
+        if ($inventory_fields && !array_key_exists($db_field, $host_inventory)) {
+            continue;
+        }
+
+        if (array_key_exists($db_field, $host_inventory) && $host_inventory[$db_field] !== '') {
+            return true;
+        }
+    }
+
+    return false;
 }
 
 function makeAnalistHostSectionInventoryCompact(string $hostid, array $host_inventory, array $inventory_fields): CDiv {

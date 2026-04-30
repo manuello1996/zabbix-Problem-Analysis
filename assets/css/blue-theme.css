@@ -5,6 +5,27 @@
     display: initial !important;
 }
 
+.monitoring-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    align-items: center;
+}
+
+.monitoring-action {
+    display: inline-flex;
+    gap: 6px;
+    align-items: center;
+    padding: 3px 8px;
+    border: 1px solid #d9d9d9;
+    border-radius: 3px;
+    line-height: 18px;
+}
+
+.monitoring-action-count {
+    margin-left: 0 !important;
+}
+
 .host-group {
     display: block !important;
 }
@@ -26,6 +47,38 @@
 .chart-items-list ul {
     list-style: disclosure-closed;
     margin-left: 20px;
+}
+
+.overview-container > div,
+.timeline-tab > div,
+.operational-data-section,
+.monthly-comparison-section,
+.problem-detail-section {
+    margin-bottom: 16px;
+}
+
+.overview-container h4,
+.timeline-tab h4,
+.operational-data-section h4,
+.monthly-comparison-section h4,
+.problem-detail-section h4 {
+    margin: 0 0 10px;
+}
+
+.operational-history-value {
+    display: flex;
+    gap: 10px;
+    align-items: baseline;
+    padding: 2px 0;
+}
+
+.operational-history-clock {
+    flex: 0 0 155px;
+    white-space: nowrap;
+}
+
+.operational-history-data {
+    font-weight: 600;
 }
 
 /* Estilos para o botão LTS */
