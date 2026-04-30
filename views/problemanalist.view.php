@@ -124,7 +124,7 @@ function formatAnalistHistoryValue($value, array $item): string {
             $item['valuemap'] = [];
         }
 
-        return (string) formatHistoryValue($value, $item);
+        return (string) formatHistoryValue($value, $item, false);
     }
 
     $units = trim((string) ($item['units'] ?? ''));

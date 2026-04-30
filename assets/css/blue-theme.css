@@ -79,6 +79,13 @@
 
 .operational-history-data {
     font-weight: 600;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+}
+
+.operational-data-section td {
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
 }
 
 /* Estilos para o botão LTS */
