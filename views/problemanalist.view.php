@@ -16,11 +16,9 @@ $this->addJsFile('class.calendar.js');
 $event = $data['event'] ?? [];
 $trigger = $data['trigger'] ?? null;
 $host = $data['host'] ?? null;
-$related_events = $data['related_events'] ?? [];
 $pattern_events = $data['pattern_events'] ?? [];
 $items = $data['items'] ?? [];
 $monthly_comparison = $data['monthly_comparison'] ?? [];
-$system_metrics = $data['system_metrics'] ?? [];
 $operational_data = $data['operational_data'] ?? ['value' => '', 'history' => []];
 
 // Format timestamps
@@ -460,9 +458,11 @@ if ($host && is_array($host)) {
         $primary_sections[] = makeAnalistHostSectionDescription($host['description']);
     }
 
+    $host_problem_total = array_sum($host['problem_count'] ?? []);
+
     // Info row 1: Core monitoring information side by side
     $info_row_1[] = makeAnalistHostSectionMonitoring($host['hostid'], $host['dashboard_count'] ?? 0,
-        $host['item_count'] ?? 0, $host['graph_count'] ?? 0, $host['web_scenario_count'] ?? 0
+        $host['item_count'] ?? 0, $host['graph_count'] ?? 0, $host['web_scenario_count'] ?? 0, $host_problem_total
     );
     $info_row_1[] = makeAnalistHostSectionAvailability($host['interfaces'] ?? []);
 
@@ -483,7 +483,7 @@ if ($host && is_array($host)) {
     }
 
     if (!empty($host['inventory'])) {
-        $secondary_sections[] = makeAnalistHostSectionInventory($host['hostid'], $host['inventory'], []);
+        $secondary_sections[] = makeAnalistHostSectionInventoryCompact($host['hostid'], $host['inventory'], []);
     }
 
     // Create organized layout containers with improved structure
@@ -2566,12 +2566,32 @@ function makeAnalistHostSectionDescription(string $description): CDiv {
 }
 
 function makeAnalistHostSectionMonitoring(string $hostid, int $dashboard_count, int $item_count, int $graph_count,
-        int $web_scenario_count): CDiv {
+        int $web_scenario_count, int $problem_total = 0): CDiv {
     $can_view_monitoring_hosts = CWebUser::checkAccess(CRoleHelper::UI_MONITORING_HOSTS);
+    $can_view_problems = CWebUser::checkAccess(CRoleHelper::UI_MONITORING_PROBLEMS);
+    $can_configure_hosts = CWebUser::checkAccess(CRoleHelper::UI_CONFIGURATION_HOSTS);
 
     return (new CDiv([
         (new CDiv(_('Monitoring')))->addClass('analisthost-section-name'),
         (new CDiv([
+            (new CDiv([
+                $can_view_problems
+                    ? (new CLink(_('Problems'),
+                        (new CUrl('zabbix.php'))
+                            ->setArgument('action', 'problem.view')
+                            ->setArgument('hostids', [$hostid])
+                            ->setArgument('filter_set', '1')
+                    ))
+                        ->addClass('monitoring-item-name')
+                        ->setTitle(_('Problems'))
+                    : (new CSpan(_('Problems')))
+                        ->addClass('monitoring-item-name')
+                        ->setTitle(_('Problems')),
+                (new CSpan($problem_total))
+                    ->addClass(ZBX_STYLE_ENTITY_COUNT)
+                    ->addClass('monitoring-item-span')
+                    ->setTitle($problem_total)
+            ]))->addClass('monitoring-item'),
             (new CDiv([
                 $can_view_monitoring_hosts && $dashboard_count > 0
                     ? (new CLink(_('Dashboards'),
@@ -2643,6 +2663,20 @@ function makeAnalistHostSectionMonitoring(string $hostid, int $dashboard_count, 
                     ->addClass(ZBX_STYLE_ENTITY_COUNT)
                     ->addClass('monitoring-item-span')
                     ->setTitle($web_scenario_count)
+            ]))->addClass('monitoring-item'),
+            (new CDiv([
+                $can_configure_hosts
+                    ? (new CLink(_('Configuration'),
+                        (new CUrl('zabbix.php'))
+                            ->setArgument('action', 'host.edit')
+                            ->setArgument('hostid', $hostid)
+                    ))
+                        ->addClass('monitoring-item-name')
+                        ->setTitle(_('Host configuration'))
+                    : (new CSpan(_('Configuration')))
+                        ->addClass('monitoring-item-name')
+                        ->setTitle(_('Host configuration')),
+                ''
             ]))->addClass('monitoring-item')
         ]))
             ->addClass('analisthost-section-body')
@@ -2829,6 +2863,90 @@ function makeAnalistHostSectionTemplates(array $host_templates): CDiv {
         ->addStyle('max-width: 100%; overflow: hidden;');
 }
 
+function makeAnalistHostSectionInventoryCompact(string $hostid, array $host_inventory, array $inventory_fields): CDiv {
+    $inventory_table = new CTableInfo();
+    $inventory_table->setHeader([_('Field'), _('Value')]);
+
+    $all_inventory_fields = [];
+    $max_visible = 10;
+    $priority_fields = [
+        'os', 'os_full', 'type', 'type_full', 'name', 'alias', 'location', 'site_address_a', 'site_city',
+        'site_country', 'contact', 'poc_1_name', 'poc_1_email', 'serialno_a', 'serialno_b', 'asset_tag',
+        'hardware', 'hardware_full', 'software', 'software_full'
+    ];
+
+    if ($host_inventory) {
+        foreach (getHostInventories() as $inventory) {
+            $db_field = $inventory['db_field'];
+
+            if ((!$inventory_fields && (!array_key_exists($db_field, $host_inventory) || $host_inventory[$db_field] === ''))
+                    || ($inventory_fields && !array_key_exists($db_field, $host_inventory))) {
+                continue;
+            }
+
+            $all_inventory_fields[] = [
+                'db_field' => $db_field,
+                'title' => $inventory['title'],
+                'value' => $host_inventory[$db_field]
+            ];
+        }
+    }
+
+    usort($all_inventory_fields, static function (array $a, array $b) use ($priority_fields): int {
+        $a_priority = array_search($a['db_field'], $priority_fields, true);
+        $b_priority = array_search($b['db_field'], $priority_fields, true);
+
+        $a_rank = ($a_priority === false) ? PHP_INT_MAX : $a_priority;
+        $b_rank = ($b_priority === false) ? PHP_INT_MAX : $b_priority;
+
+        return $a_rank === $b_rank
+            ? strcasecmp($a['title'], $b['title'])
+            : ($a_rank <=> $b_rank);
+    });
+
+    foreach (array_slice($all_inventory_fields, 0, $max_visible) as $field) {
+        $inventory_table->addRow([
+            $field['title'],
+            (new CCol($field['value']))
+                ->addClass(ZBX_STYLE_WORDBREAK)
+                ->setTitle($field['value'])
+        ]);
+    }
+
+    if (!$all_inventory_fields) {
+        $inventory_table->addRow([_('No inventory data available'), '']);
+    }
+    elseif (count($all_inventory_fields) > $max_visible) {
+        $hint_table = new CTableInfo();
+        $hint_table->setHeader([_('Field'), _('Value')]);
+
+        foreach (array_slice($all_inventory_fields, $max_visible) as $field) {
+            $hint_table->addRow([
+                $field['title'],
+                (new CCol($field['value']))->addClass(ZBX_STYLE_WORDBREAK)
+            ]);
+        }
+
+        $inventory_table->addRow([
+            '',
+            (new CLink(new CIcon('zi-more')))
+                ->addClass(ZBX_STYLE_LINK_ALT)
+                ->setHint($hint_table, ZBX_STYLE_HINTBOX_WRAP)
+        ]);
+    }
+
+    return (new CDiv([
+        (new CDiv(
+            CWebUser::checkAccess(CRoleHelper::UI_INVENTORY_HOSTS)
+                ? new CLink(_('Inventory'), (new CUrl('hostinventories.php'))->setArgument('hostid', $hostid))
+                : _('Inventory')
+        ))->addClass('analisthost-section-name'),
+        (new CDiv($inventory_table))->addClass('analisthost-section-body')
+    ]))
+        ->addClass('analisthost-section')
+        ->addClass('section-inventory');
+}
+
 function makeAnalistHostSectionInventory(string $hostid, array $host_inventory, array $inventory_fields): CDiv {
     $inventory_list = [];
     $all_inventory_fields = [];
@@ -2905,25 +3023,17 @@ function makeAnalistHostSectionTags(array $host_tags): CDiv {
 
     foreach ($host_tags as $tag) {
         $tag_text = $tag['tag'].($tag['value'] === '' ? '' : ': '.$tag['value']);
-        $tags[] = (new CSpan($tag_text))->addClass('tag') ->addStyle('max-width: 200px;');
+        $tags[] = (new CSpan($tag_text))->addClass('tag')->addClass('analisthost-tag');
     }
 
     return (new CDiv([
         (new CDiv(_('Tags')))->addClass('analisthost-section-name'),
         (new CDiv($tags))
             ->addClass('analisthost-section-body')
-            ->addStyle('
-                max-width: 100%;
-                overflow: hidden;
-                display: flex;
-                flex-wrap: wrap;
-                gap: 4px;
-                align-items: center;
-            ')
+            ->addClass('analisthost-tags')
     ]))
         ->addClass('analisthost-section')
-        ->addClass('section-tags')
-        ->addStyle('max-width: 100%; overflow: hidden;');
+        ->addClass('section-tags');
 }
 
 if (isset($data['user']['debug_mode']) && $data['user']['debug_mode'] == 1) {

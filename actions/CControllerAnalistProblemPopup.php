@@ -11,7 +11,9 @@ use CControllerResponseData;
 use API;
 use CArrayHelper;
 use CMacrosResolverHelper;
+use CSettingsHelper;
 use CSeverityHelper;
+use Manager;
 
 /**
  * Controller for event details popup
@@ -140,54 +142,15 @@ class CControllerAnalistProblemPopup extends CController {
 
         }
 
-        // Get related events for timeline
-        $related_events = [];
+        // Get problem events for Time Patterns.
         $pattern_events = [];
         if ($actual_triggerid > 0) {
-            $related_events = API::Event()->get([
-                'output'    => ['eventid', 'clock', 'value', 'acknowledged', 'name', 'severity'],
-                'source'    => 0, // EVENT_SOURCE_TRIGGERS
-                'object'    => 0, // EVENT_OBJECT_TRIGGER
-                'objectids' => $actual_triggerid,
-                'sortfield' => 'clock',
-                'sortorder' => 'DESC',
-                'limit'     => 20
-            ]);
-
-            // Fix severity for resolution events
-            $trigger_severity     = $trigger && isset($trigger['priority']) ? (int)$trigger['priority'] : 0;
-            $main_event_severity  = isset($event['severity']) ? (int)$event['severity'] : 0;
-            $last_problem_severity = 0;
-
-            // Process events in chronological order to track problem severity
-            $events_chronological = array_reverse($related_events);
-            foreach ($events_chronological as &$rel_event) {
-                if ($rel_event['value'] == 1) {
-                    // Problem event: update the last known severity
-                    $last_problem_severity = (int)$rel_event['severity'];
-                } else {
-                    // Resolution event: normalize severity
-                    $resolution_severity = $last_problem_severity > 0
-                        ? $last_problem_severity
-                        : ($main_event_severity > 0 ? $main_event_severity : $trigger_severity);
-                    $rel_event['severity'] = $resolution_severity;
-                }
-            }
-            unset($rel_event);
-
-            // Restore original order (DESC)
-            $related_events = array_reverse($events_chronological);
-
-            $related_events = array_filter($related_events, function($ev) {
-                return (int)$ev['value'] === 1;
-            });
-
             // Get problem events from the last 12 months for Time Patterns/Heatmap.
             $pattern_time_till = isset($event['clock']) ? (int)$event['clock'] : time();
             $pattern_time_from = strtotime('-12 months', $pattern_time_till);
 
             $pattern_events = API::Event()->get([
-                'output'    => ['eventid', 'clock', 'value', 'acknowledged', 'name', 'severity'],
+                'output'    => ['clock'],
                 'source'    => 0, // EVENT_SOURCE_TRIGGERS
                 'object'    => 0, // EVENT_OBJECT_TRIGGER
                 'objectids' => $actual_triggerid,
@@ -214,26 +177,18 @@ class CControllerAnalistProblemPopup extends CController {
                         'valuemapid'
                     ],
                     'itemids' => $unique_itemids,
+                    'monitored' => true,
                     'selectValueMap' => ['mappings']
                 ]);
 
-                // Get items and ensure no duplicates by using itemid as key
-                $raw_items = API::Item()->get([
-                    'output' => ['itemid', 'name', 'key_', 'hostid', 'value_type'],
-                    'itemids' => $unique_itemids,
-                    'monitored' => true,
-                    'filter' => [
-                        'value_type' => [ITEM_VALUE_TYPE_FLOAT, ITEM_VALUE_TYPE_UINT64] // Only numeric items for graphs
-                    ]
-                ]);
-
-                // Use itemid as key to prevent any potential duplicates
+                // Use itemid as key to prevent any potential duplicates.
                 $items_by_id = [];
-                foreach ($raw_items as $item) {
-                    $items_by_id[$item['itemid']] = $item;
+                foreach ($trigger_items as $item) {
+                    if (in_array((int) $item['value_type'], [ITEM_VALUE_TYPE_FLOAT, ITEM_VALUE_TYPE_UINT64], true)) {
+                        $items_by_id[$item['itemid']] = $item;
+                    }
                 }
 
-                // Convert back to indexed array
                 $items = array_values($items_by_id);
             }
         }
@@ -249,30 +204,41 @@ class CControllerAnalistProblemPopup extends CController {
 
             $months = [];
 
-            // Build last 6 months: 0 = current month, 1..5 = back in time
+            // Build last 6 months: 0 = current month, 1..5 = back in time.
             for ($i = 0; $i < 6; $i++) {
                 $start = strtotime("-{$i} month", $base_month_start);
-                // Month end = last day of that month 23:59:59
                 $end = mktime(23, 59, 59, (int)date('n', $start), (int)date('t', $start), (int)date('Y', $start));
-
-                // Fetch problem events for this month
-                $events = API::Event()->get([
-                    'output'    => ['eventid', 'clock', 'value', 'severity'],
-                    'source'    => 0,
-                    'object'    => 0,
-                    'objectids' => $actual_triggerid,
-                    'time_from' => $start,
-                    'time_till' => $end,
-                    'value'     => 1 // Only problem events
-                ]);
 
                 $months[$i] = [
                     'name'   => date('F Y', $start),
-                    'count'  => count($events),
-                    'events' => $events,
+                    'count'  => 0,
+                    'events' => [],
                     'start'  => $start,
                     'end'    => $end
                 ];
+            }
+
+            $comparison_events = API::Event()->get([
+                'output'    => ['clock'],
+                'source'    => 0,
+                'object'    => 0,
+                'objectids' => $actual_triggerid,
+                'time_from' => $months[5]['start'],
+                'time_till' => $months[0]['end'],
+                'value'     => 1
+            ]);
+
+            foreach ($comparison_events as $comparison_event) {
+                $clock = (int) $comparison_event['clock'];
+
+                foreach ($months as &$month) {
+                    if ($clock >= $month['start'] && $clock <= $month['end']) {
+                        $month['events'][] = $comparison_event;
+                        $month['count']++;
+                        break;
+                    }
+                }
+                unset($month);
             }
 
             // Add month-over-month percentage change for each entry where we have a previous month
@@ -304,12 +270,6 @@ class CControllerAnalistProblemPopup extends CController {
         // Get monthly comparison data
 
 
-        // Get system metrics at event time (only for Zabbix Agent hosts)
-        $system_metrics = [];
-        if ($host && isset($event['clock']) && isset($host['interfaces'])) {
-            $system_metrics = $this->getSystemMetricsAtEventTime($host, $event['clock']);
-        }
-
         $operational_data = $this->getOperationalData($trigger, $event, $trigger_items);
 
         // Prepare data for view
@@ -317,11 +277,9 @@ class CControllerAnalistProblemPopup extends CController {
             'event' => $event,
             'trigger' => $trigger,
             'host' => $host,
-            'related_events' => $related_events,
             'pattern_events' => $pattern_events,
             'items' => $items,
             'monthly_comparison' => $monthly_comparison,
-            'system_metrics' => $system_metrics,
             'operational_data' => $operational_data,
             'user' => [
                 'debug_mode' => $this->getDebugMode()
@@ -385,19 +343,11 @@ class CControllerAnalistProblemPopup extends CController {
 
         // Get problem count for header
         if ($host['status'] == HOST_STATUS_MONITORED) {
-            $db_triggers = API::Trigger()->get([
-                'output' => [],
-                'hostids' => [$host['hostid']],
-                'skipDependent' => true,
-                'monitored' => true,
-                'preservekeys' => true
-            ]);
-
             $db_problems = API::Problem()->get([
                 'output' => ['eventid', 'severity'],
                 'source' => EVENT_SOURCE_TRIGGERS,
                 'object' => EVENT_OBJECT_TRIGGER,
-                'objectids' => array_keys($db_triggers),
+                'hostids' => [$host['hostid']],
                 'suppressed' => false,
                 'symptom' => false
             ]);
@@ -572,10 +522,13 @@ class CControllerAnalistProblemPopup extends CController {
             return $data;
         }
 
-        foreach ($trigger_items as $item) {
-            $history_type = (int) $item['value_type'];
+        $items_by_id = zbx_toHash($trigger_items, 'itemid');
+        $history_values = Manager::History()->getLastValues($items_by_id, 3, timeUnitToSeconds(CSettingsHelper::get(
+            CSettingsHelper::HISTORY_PERIOD
+        )));
 
-            if ($history_type === ITEM_VALUE_TYPE_BINARY) {
+        foreach ($items_by_id as $itemid => $item) {
+            if ((int) $item['value_type'] === ITEM_VALUE_TYPE_BINARY) {
                 $data['history'][] = [
                     'item' => $item,
                     'values' => [[
@@ -587,14 +540,7 @@ class CControllerAnalistProblemPopup extends CController {
                 continue;
             }
 
-            $values = API::History()->get([
-                'output' => ['itemid', 'clock', 'ns', 'value'],
-                'history' => $history_type,
-                'itemids' => [$item['itemid']],
-                'sortfield' => 'clock',
-                'sortorder' => 'DESC',
-                'limit' => 3
-            ]);
+            $values = $history_values[$itemid] ?? [];
 
             if (!$values && array_key_exists('lastvalue', $item) && $item['lastvalue'] !== '') {
                 $values = [[

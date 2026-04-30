@@ -197,6 +197,22 @@
     word-wrap: break-word;
 }
 
+.analisthost-tags {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px;
+    align-items: center;
+    max-width: 100%;
+}
+
+.analisthost-tag {
+    max-width: 200px;
+}
+
+.section-inventory .list-table {
+    margin-bottom: 0;
+}
+
 /* Availability section specific styles */
 .section-availability .analisthost-section-body {
     display: flex;
