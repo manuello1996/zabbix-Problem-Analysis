@@ -10,6 +10,7 @@ use CController;
 use CControllerResponseData;
 use API;
 use CArrayHelper;
+use CMacrosResolverHelper;
 use CSeverityHelper;
 
 /**
@@ -61,7 +62,9 @@ class CControllerAnalistProblemPopup extends CController {
 
         // Get event details
         $events = API::Event()->get([
-            'output' => ['eventid', 'source', 'object', 'objectid', 'clock', 'ns', 'value', 'acknowledged', 'name', 'severity'],
+            'output' => ['eventid', 'source', 'object', 'objectid', 'clock', 'ns', 'value', 'acknowledged', 'name',
+                'severity', 'opdata'
+            ],
             'eventids' => $eventid,
             'selectTags' => ['tag', 'value']
         ]);
@@ -79,6 +82,7 @@ class CControllerAnalistProblemPopup extends CController {
                 'source' => 0,
                 'object' => 0,
                 'objectid' => 0,
+                'opdata' => '',
                 'value' => 1
             ];
         }
@@ -94,7 +98,7 @@ class CControllerAnalistProblemPopup extends CController {
 
         if ($actual_triggerid > 0) {
             $triggers = API::Trigger()->get([
-                'output' => ['triggerid', 'description', 'expression', 'comments', 'priority'],
+                'output' => ['triggerid', 'description', 'expression', 'comments', 'priority', 'opdata', 'manual_close'],
                 'triggerids' => $actual_triggerid,
                 'selectHosts' => ['hostid', 'host', 'name'],
                 'selectItems' => ['itemid', 'hostid', 'name', 'key_'], // This will get all items with itemid
@@ -197,12 +201,21 @@ class CControllerAnalistProblemPopup extends CController {
 
         // Get items for graphs - usar itemids do selectItems diretamente
         $items = [];
+        $trigger_items = [];
 
         if ($trigger && $actual_triggerid > 0) {
             if (isset($trigger['items']) && !empty($trigger['items'])) {
                 // Get itemids from selectItems and ensure uniqueness
                 $trigger_itemids = array_column($trigger['items'], 'itemid');
                 $unique_itemids = array_unique($trigger_itemids);
+
+                $trigger_items = API::Item()->get([
+                    'output' => ['itemid', 'name', 'key_', 'hostid', 'value_type', 'units', 'lastvalue', 'lastclock',
+                        'valuemapid'
+                    ],
+                    'itemids' => $unique_itemids,
+                    'selectValueMap' => ['mappings']
+                ]);
 
                 // Get items and ensure no duplicates by using itemid as key
                 $raw_items = API::Item()->get([
@@ -297,6 +310,8 @@ class CControllerAnalistProblemPopup extends CController {
             $system_metrics = $this->getSystemMetricsAtEventTime($host, $event['clock']);
         }
 
+        $operational_data = $this->getOperationalData($trigger, $event, $trigger_items);
+
         // Prepare data for view
         $data = [
             'event' => $event,
@@ -307,6 +322,7 @@ class CControllerAnalistProblemPopup extends CController {
             'items' => $items,
             'monthly_comparison' => $monthly_comparison,
             'system_metrics' => $system_metrics,
+            'operational_data' => $operational_data,
             'user' => [
                 'debug_mode' => $this->getDebugMode()
             ]
@@ -516,6 +532,86 @@ class CControllerAnalistProblemPopup extends CController {
         $host['tags'] = $tags;
 
         return $host;
+    }
+
+    private function getOperationalData(?array $trigger, array $event, array $trigger_items): array {
+        $data = [
+            'value' => '',
+            'history' => []
+        ];
+
+        $event_opdata = trim((string) ($event['opdata'] ?? ''));
+
+        if ($event_opdata !== '') {
+            $data['value'] = $event['opdata'];
+
+            return $data;
+        }
+
+        if (!$trigger) {
+            return $data;
+        }
+
+        $opdata = trim((string) ($trigger['opdata'] ?? ''));
+
+        if ($opdata !== '') {
+            $data['value'] = CMacrosResolverHelper::resolveTriggerOpdata(
+                [
+                    'triggerid' => $trigger['triggerid'],
+                    'expression' => $trigger['expression'],
+                    'opdata' => $trigger['opdata'],
+                    'clock' => (int) ($event['clock'] ?? time()),
+                    'ns' => (int) ($event['ns'] ?? 0)
+                ],
+                [
+                    'events' => true,
+                    'html' => true
+                ]
+            );
+
+            return $data;
+        }
+
+        foreach ($trigger_items as $item) {
+            $history_type = (int) $item['value_type'];
+
+            if ($history_type === ITEM_VALUE_TYPE_BINARY) {
+                $data['history'][] = [
+                    'item' => $item,
+                    'values' => [[
+                        'clock' => $item['lastclock'] ?? null,
+                        'ns' => 0,
+                        'value' => _('binary value')
+                    ]]
+                ];
+                continue;
+            }
+
+            $values = API::History()->get([
+                'output' => ['itemid', 'clock', 'ns', 'value'],
+                'history' => $history_type,
+                'itemids' => [$item['itemid']],
+                'sortfield' => 'clock',
+                'sortorder' => 'DESC',
+                'limit' => 3
+            ]);
+
+            if (!$values && array_key_exists('lastvalue', $item) && $item['lastvalue'] !== '') {
+                $values = [[
+                    'itemid' => $item['itemid'],
+                    'clock' => $item['lastclock'] ?? null,
+                    'ns' => 0,
+                    'value' => $item['lastvalue']
+                ]];
+            }
+
+            $data['history'][] = [
+                'item' => $item,
+                'values' => $values
+            ];
+        }
+
+        return $data;
     }
 
     private function getSystemMetricsAtEventTime($host, $event_timestamp) {

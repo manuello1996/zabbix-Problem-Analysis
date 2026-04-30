@@ -21,6 +21,7 @@ $pattern_events = $data['pattern_events'] ?? [];
 $items = $data['items'] ?? [];
 $monthly_comparison = $data['monthly_comparison'] ?? [];
 $system_metrics = $data['system_metrics'] ?? [];
+$operational_data = $data['operational_data'] ?? ['value' => '', 'history' => []];
 
 // Format timestamps
 $event_time = isset($event['clock']) ? zbx_date2str(DATE_TIME_FORMAT_SECONDS, $event['clock']) : '';
@@ -115,8 +116,165 @@ function createEssentialMetricsTable($metrics) {
     return $table;
 }
 
+function formatAnalistHistoryValue($value, array $item): string {
+    if ((int) ($item['value_type'] ?? -1) === ITEM_VALUE_TYPE_BINARY) {
+        return _('binary value');
+    }
+
+    if (function_exists('formatHistoryValue')) {
+        if (!array_key_exists('valuemap', $item) || !is_array($item['valuemap'])) {
+            $item['valuemap'] = [];
+        }
+
+        return (string) formatHistoryValue($value, $item);
+    }
+
+    $units = trim((string) ($item['units'] ?? ''));
+    return (string) $value . ($units !== '' ? ' '.$units : '');
+}
+
+function createOperationalDataSection(array $operational_data): CDiv {
+    $section = (new CDiv())->addClass('operational-data-section');
+    $section->addItem(new CTag('h4', false, _('Ops Data')));
+
+    $opdata = $operational_data['value'] ?? '';
+
+    if (is_string($opdata) && trim($opdata) !== '') {
+        $table = new CTableInfo();
+        $table->setHeader([_('Operational data')]);
+        $table->addRow([(new CCol($opdata))->addClass(ZBX_STYLE_WORDBREAK)]);
+        $section->addItem($table);
+
+        return $section;
+    }
+
+    $history = $operational_data['history'] ?? [];
+    $table = new CTableInfo();
+    $table->setHeader([_('Item'), _('Latest 3 values')]);
+
+    if (!$history) {
+        $table->addRow([_('No operational data or item history available'), '']);
+        $section->addItem($table);
+
+        return $section;
+    }
+
+    foreach ($history as $entry) {
+        $item = $entry['item'] ?? [];
+        $values = $entry['values'] ?? [];
+        $value_lines = [];
+
+        foreach ($values as $value) {
+            $clock = isset($value['clock']) && $value['clock'] !== null
+                ? zbx_date2str(DATE_TIME_FORMAT_SECONDS, (int) $value['clock'])
+                : _('N/A');
+
+            $value_lines[] = (new CDiv([
+                (new CSpan($clock))->addClass('grey'),
+                new CSpan(' - '),
+                (new CSpan(formatAnalistHistoryValue($value['value'] ?? '', $item)))->addClass(ZBX_STYLE_WORDBREAK)
+            ]))->addClass('operational-history-value');
+        }
+
+        if (!$value_lines) {
+            $value_lines[] = new CSpan(_('No history values found'));
+        }
+
+        $table->addRow([
+            (new CCol($item['name'] ?? $item['key_'] ?? _('Unknown item')))->addClass(ZBX_STYLE_WORDBREAK),
+            (new CCol($value_lines))->addClass(ZBX_STYLE_WORDBREAK)
+        ]);
+    }
+
+    $section->addItem($table);
+
+    return $section;
+}
+
+function createMonthlyComparisonSection(array $monthly_comparison): ?CDiv {
+    if (empty($monthly_comparison)) {
+        return null;
+    }
+
+    $section = (new CDiv())->addClass('monthly-comparison-section');
+    $section->addItem(new CTag('h4', false, _('Monthly Comparison')));
+
+    $months = [];
+
+    if (!empty($monthly_comparison['months'])) {
+        $months = array_reverse($monthly_comparison['months']);
+    }
+    elseif (!empty($monthly_comparison['current_month'])) {
+        $months = [
+            $monthly_comparison['previous_month'],
+            $monthly_comparison['current_month']
+        ];
+    }
+
+    if (!$months) {
+        return $section;
+    }
+
+    $tables = [];
+    foreach (array_chunk($months, 3) as $month_group) {
+        $table = new CTableInfo();
+        $table->setHeader([_('Period'), _('Incidents'), _('Change')]);
+
+        foreach ($month_group as $m) {
+            $chg = $m['change_percentage'] ?? null;
+            $change_color = '#666666';
+            $change_icon = '->';
+            $change_text = ($chg === null) ? '-' : (($chg > 0) ? ('+' . $chg . '%') : ($chg . '%'));
+
+            if ($chg !== null) {
+                if ($chg > 0) {
+                    $change_color = '#e74c3c';
+                    $change_icon = '^';
+                }
+                elseif ($chg < 0) {
+                    $change_color = '#27ae60';
+                    $change_icon = 'v';
+                }
+            }
+
+            $table->addRow([
+                $m['name'],
+                $m['count'],
+                ($chg === null)
+                    ? '-'
+                    : (new CSpan($change_icon . ' ' . $change_text))
+                        ->addStyle("color: {$change_color}; font-weight: bold;")
+            ]);
+        }
+
+        $tables[] = $table;
+    }
+
+    $section->addItem(
+        (new CDiv($tables))
+            ->addClass('monthly-comparison-tables')
+            ->addStyle('display: grid; grid-template-columns: repeat(2, minmax(280px, 1fr)); gap: 15px;')
+    );
+
+    $latest_chg = $monthly_comparison['change_percentage'] ?? 0;
+    if ($latest_chg != 0) {
+        $change_color = ($latest_chg > 0) ? '#e74c3c' : '#27ae60';
+        $trend_message = ($latest_chg > 0)
+            ? (_('Incidents increased by') . ' ' . abs($latest_chg) . '% ' . _('compared to previous month'))
+            : (_('Incidents decreased by') . ' ' . abs($latest_chg) . '% ' . _('compared to previous month'));
+
+        $section->addItem(
+            (new CDiv($trend_message))
+                ->addStyle("color: {$change_color}; font-style: italic; margin-top: 10px; font-size: 12px;")
+        );
+    }
+
+    return $section;
+}
+
 // Create tabs
-$tabs = new CTabView();
+CCookieHelper::unset('tab');
+$tabs = (new CTabView())->setSelected(0);
 
 // Event Overview data (used in TAB 2)
 $overview_table = new CTableInfo();
@@ -149,32 +307,18 @@ if ($trigger) {
     }
 }
 
-// System metrics section - only for Zabbix Agent hosts
-$metrics_section = null;
-if (!empty($system_metrics) && $system_metrics['available'] && $system_metrics['type'] === 'agent') {
-    $metrics_section = new CDiv();
-    $metrics_section->addClass('system-metrics-section');
-
-    $metrics_section->addItem(new CTag('h4', false, _('Metrics')));
-
-    // Create simple metrics table
-    $metrics_table = createEssentialMetricsTable($system_metrics['categories']);
-    $metrics_section->addItem($metrics_table);
-}
-
-// Create overview container that includes both table and monthly comparison
+// Create overview container with full-width rows.
 $overview_container = new CDiv();
+$overview_container
+    ->addClass('overview-container')
+    ->addStyle('display: flex; flex-direction: column; gap: 15px;');
 
-// Create a flexible container for Last Value and Monthly Comparison side by side
+$overview_container->addItem(createOperationalDataSection($operational_data));
+
+$overview_monthly_comparison = $monthly_comparison;
+$monthly_comparison = [];
+$metrics_section = null;
 $top_sections_container = new CDiv();
-$top_sections_container->addClass('overview-top-sections');
-$top_sections_container->addStyle('display: flex; gap: 20px; margin-bottom: 15px;');
-
-// Add system metrics (Last Value) to the left side
-if ($metrics_section) {
-    $metrics_section->addStyle('flex: 1; min-width: 300px;');
-    $top_sections_container->addItem($metrics_section);
-}
 
 
 // Add monthly comparison section to the right side if data is available
@@ -289,8 +433,11 @@ if ($metrics_section || (!empty($monthly_comparison) && !empty($monthly_comparis
     $overview_container->addItem($top_sections_container);
 }
 
-// Add the main overview table below the top sections
-$overview_container->addItem($overview_table);
+$problem_detail_section = new CDiv();
+$problem_detail_section->addClass('problem-detail-section');
+$problem_detail_section->addItem(new CTag('h4', false, _('Problem detail')));
+$problem_detail_section->addItem($overview_table);
+$overview_container->addItem($problem_detail_section);
 
 // TAB 1: Host Information - Primeiro tab
 $host_div = new CDiv();
@@ -388,13 +535,19 @@ if ($host && is_array($host)) {
     $host_div->addItem(new CDiv(_('Host information not available')));
 }
 
-$tabs->addTab('host', _('Host Info'), $host_div);
-
-// TAB 2: Overview
+// TAB 1: Overview
 $tabs->addTab('overview', _('Overview'), $overview_container);
+
+// TAB 2: Host Information
+$tabs->addTab('host', _('Host Info'), $host_div);
 
 // TAB 3: Event Timeline
 $timeline_div = new CDiv();
+
+$timeline_comparison_section = createMonthlyComparisonSection($overview_monthly_comparison);
+if ($timeline_comparison_section !== null) {
+    $timeline_div->addItem($timeline_comparison_section);
+}
 
 // Use Zabbix's built-in function to create the event list
 $allowed = [
