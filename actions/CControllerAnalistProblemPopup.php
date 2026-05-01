@@ -68,7 +68,8 @@ class CControllerAnalistProblemPopup extends CController {
                 'severity', 'opdata', 'r_eventid'
             ],
             'eventids' => $eventid,
-            'selectTags' => ['tag', 'value']
+            'selectTags' => ['tag', 'value'],
+            'select_acknowledges' => ['acknowledgeid', 'clock', 'action']
         ]);
 
         $event = $events ? $events[0] : [];
@@ -88,6 +89,21 @@ class CControllerAnalistProblemPopup extends CController {
                 'opdata' => '',
                 'value' => 1
             ];
+        }
+
+        if (!empty($event['acknowledges'])) {
+            CArrayHelper::sort($event['acknowledges'], ['clock', 'acknowledgeid']);
+
+            foreach ($event['acknowledges'] as $acknowledge) {
+                $action = (int) ($acknowledge['action'] ?? 0);
+
+                if (($action & ZBX_PROBLEM_UPDATE_ACKNOWLEDGE) === ZBX_PROBLEM_UPDATE_ACKNOWLEDGE) {
+                    $event['acknowledged'] = EVENT_ACKNOWLEDGED;
+                }
+                elseif (($action & ZBX_PROBLEM_UPDATE_UNACKNOWLEDGE) === ZBX_PROBLEM_UPDATE_UNACKNOWLEDGE) {
+                    $event['acknowledged'] = EVENT_NOT_ACKNOWLEDGED;
+                }
+            }
         }
 
         $recovery_eventid = (int) ($event['r_eventid'] ?? 0);

@@ -105,15 +105,34 @@
     line-height: 1;
 }
 
-.analist-severity-pill {
-    display: inline-flex;
-    align-items: center;
-    min-height: 20px;
-    padding: 2px 8px;
-    border: 1px solid transparent;
-    border-radius: 3px;
-    font-weight: 600;
-    line-height: 16px;
+.problem-detail-section h4 {
+    color: #5f7894;
+    font-size: 13px;
+    font-weight: normal;
+    line-height: 18px;
+}
+
+.analist-problem-detail-table {
+    table-layout: fixed;
+}
+
+.analist-problem-detail-table td {
+    font-size: 13px;
+    line-height: 18px;
+    padding-top: 6px;
+    padding-bottom: 6px;
+    vertical-align: top;
+}
+
+.analist-problem-detail-table .analist-detail-label {
+    width: 11%;
+    white-space: nowrap;
+    color: #5f7894;
+    font-weight: normal;
+}
+
+.analist-problem-detail-table .analist-detail-value {
+    width: 39%;
 }
 
 /* Estilos para o botão LTS */

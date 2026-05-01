@@ -47,9 +47,7 @@ $problem_duration = isset($event['clock'])
 
 // Get severity info
 $severity = isset($event['severity']) ? (int) $event['severity'] : 0;
-$severity_name = CSeverityHelper::getName($severity);
-$severity_color = CSeverityHelper::getColor($severity);
-$is_acknowledged = (int) ($event['acknowledged'] ?? 0) === EVENT_ACKNOWLEDGED;
+$is_acknowledged = (int) ($event['acknowledged'] ?? EVENT_NOT_ACKNOWLEDGED) === (int) EVENT_ACKNOWLEDGED;
 $acknowledgement_value = (new CDiv([
     (new CIcon(
         $is_acknowledged ? ZBX_ICON_CHECK : ZBX_ICON_UNCHECK,
@@ -57,11 +55,6 @@ $acknowledgement_value = (new CDiv([
     ))->addClass($is_acknowledged ? ZBX_STYLE_COLOR_POSITIVE : ZBX_STYLE_COLOR_NEGATIVE),
     new CSpan($is_acknowledged ? _('Acknowledged') : _('Unacknowledged'))
 ]))->addClass('analist-detail-inline');
-$severity_value = (new CSpan($severity_name))
-    ->addClass(CSeverityHelper::getStyle($severity))
-    ->addClass('analist-severity-pill')
-    ->setAttribute('data-severity-color', $severity_color)
-    ->addStyle('border-color: #'.$severity_color.';');
 
 /**
  * Create essential metrics table for Zabbix Agent hosts
@@ -313,35 +306,86 @@ function createMonthlyComparisonSection(array $monthly_comparison): ?CDiv {
 CCookieHelper::unset('tab');
 $tabs = (new CTabView())->setSelected(0);
 
-// Event Overview data (used in TAB 2)
-$overview_table = new CTableInfo();
-$overview_table->setHeader([_('Property'), _('Value')]);
+// Problem details, aligned with the native Zabbix trigger/event details layout.
+$details_label = static function (string $label): CCol {
+    return (new CCol($label))->addClass('analist-detail-label');
+};
 
-$overview_table->addRow([_('Event time'), $event_time_value]);
-$overview_table->addRow([_('Acknowledgement'), $acknowledgement_value]);
-$overview_table->addRow([_('Event ID'), $event['eventid'] ?? 'N/A']);
-$overview_table->addRow([_('Problem name'), $event['name'] ?? 'Unknown Problem']);
-$overview_table->addRow([_('Host'), $host ? ($host['name'] ?? $host['host'] ?? 'Unknown') : 'N/A']);
-$overview_table->addRow([_('Status'), $is_resolved ? _('Resolved') : _('Problem')]);
-$overview_table->addRow([_('Severity'), $severity_value]);
-$overview_table->addRow([_('Age'), $time_ago ?: 'N/A']);
+$details_value = static function ($value): CCol {
+    return (new CCol($value))->addClass('analist-detail-value');
+};
+
+$details_full_value = static function ($value): CCol {
+    return (new CCol($value))
+        ->setColSpan(3)
+        ->addClass('analist-detail-value')
+        ->addClass(ZBX_STYLE_WORDBREAK);
+};
+
+$problem_details_table = new CTableInfo();
+$problem_details_table
+    ->addClass('analist-detail-table')
+    ->addClass('analist-problem-detail-table');
+
+$problem_details_table->addRow([
+    $details_label(_('Event')),
+    $details_full_value($event['name'] ?? '')
+]);
+
+$problem_details_table->addRow([
+    $details_label(_('Time')),
+    $details_full_value($event_time_value)
+]);
+
+$problem_details_table->addRow([
+    $details_label(_('Severity')),
+    CSeverityHelper::makeSeverityCell($severity),
+    $details_label(_('Acknowledged')),
+    $details_value($acknowledgement_value)
+]);
 
 if ($is_resolved) {
-    $overview_table->addRow([_('Recovery time'), $recovery_time ?: _('Unknown')]);
-    $overview_table->addRow([_('Duration'), $problem_duration ?: _('Unknown')]);
+    $problem_details_table->addRow([
+        $details_label(_('Recovery time')),
+        $details_value($recovery_time ?: _('Unknown')),
+        $details_label(_('Duration')),
+        $details_value($problem_duration ?: _('Unknown'))
+    ]);
+}
+else {
+    $problem_details_table->addRow([
+        $details_label(_('Age')),
+        $details_value($time_ago ?: 'N/A')
+    ]);
 }
 
-if ($trigger) {
-    if (isset($trigger['expression'])) {
-        $overview_table->addRow([_('Trigger expression'),
-            (new CCol($trigger['expression']))->addClass(ZBX_STYLE_WORDBREAK)
-        ]);
-    }
-    if (isset($trigger['comments']) && $trigger['comments']) {
-        $overview_table->addRow([_('Comments'),
-            (new CCol($trigger['comments']))->addClass(ZBX_STYLE_WORDBREAK)
-        ]);
-    }
+$event_tags = makeTags([$event], true, 'eventid', count($event['tags'] ?? []));
+if (!empty($event_tags[$event['eventid']])) {
+    $problem_details_table->addRow([
+        $details_label(_('Tags')),
+        $details_full_value((new CDiv($event_tags[$event['eventid']]))->addClass(ZBX_STYLE_TAGS_WRAPPER))
+    ]);
+}
+
+if ($trigger && isset($trigger['comments']) && $trigger['comments'] !== '') {
+    $problem_details_table->addRow([
+        $details_label(_('Description')),
+        $details_full_value($trigger['comments'])
+    ]);
+}
+
+if ($trigger && isset($trigger['expression']) && $trigger['expression'] !== '') {
+    $problem_details_table->addRow([
+        $details_label(_('Problem expression')),
+        $details_full_value((new CDiv($trigger['expression']))->addClass(ZBX_STYLE_WORDBREAK))
+    ]);
+}
+
+if ($trigger && isset($trigger['recovery_expression']) && $trigger['recovery_expression'] !== '') {
+    $problem_details_table->addRow([
+        $details_label(_('Recovery expression')),
+        $details_full_value((new CDiv($trigger['recovery_expression']))->addClass(ZBX_STYLE_WORDBREAK))
+    ]);
 }
 
 // Create overview container with full-width rows.
@@ -472,8 +516,8 @@ if ($metrics_section || (!empty($monthly_comparison) && !empty($monthly_comparis
 
 $problem_detail_section = new CDiv();
 $problem_detail_section->addClass('problem-detail-section');
-$problem_detail_section->addItem(new CTag('h4', false, _('Problem Detail')));
-$problem_detail_section->addItem($overview_table);
+$problem_detail_section->addItem(new CTag('h4', false, _('Problem details')));
+$problem_detail_section->addItem($problem_details_table);
 $overview_container->addItem($problem_detail_section);
 
 // TAB 1: Host Information - Primeiro tab
