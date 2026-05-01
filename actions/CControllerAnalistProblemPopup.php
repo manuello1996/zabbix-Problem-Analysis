@@ -10,7 +10,6 @@ use CController;
 use CControllerResponseData;
 use API;
 use CArrayHelper;
-use CMacrosResolverHelper;
 use CSettingsHelper;
 use CSeverityHelper;
 use Manager;
@@ -490,37 +489,7 @@ class CControllerAnalistProblemPopup extends CController {
             'history' => []
         ];
 
-        if (!$trigger) {
-            $event_opdata = trim((string) ($event['opdata'] ?? ''));
-
-            if ($event_opdata !== '') {
-                $data['value'] = $event['opdata'];
-            }
-
-            return $data;
-        }
-
-        $opdata = trim((string) ($trigger['opdata'] ?? ''));
-
-        if ($opdata !== '') {
-            $event_opdata = trim((string) ($event['opdata'] ?? ''));
-            $resolved_opdata = $event_opdata !== ''
-                ? (string) $event['opdata']
-                : CMacrosResolverHelper::resolveTriggerOpdata(
-                    [
-                        'triggerid' => $trigger['triggerid'],
-                        'expression' => $trigger['expression'],
-                        'opdata' => $trigger['opdata'],
-                        'clock' => (int) ($event['clock'] ?? time()),
-                        'ns' => (int) ($event['ns'] ?? 0)
-                    ],
-                    [
-                        'events' => true,
-                        'html' => false
-                    ]
-                );
-            $data['value'] = $this->resolveFullOperationalData($opdata, $resolved_opdata, $trigger_items, $event);
-
+        if (!$trigger || !$trigger_items) {
             return $data;
         }
 
@@ -560,75 +529,6 @@ class CControllerAnalistProblemPopup extends CController {
         }
 
         return $data;
-    }
-
-    private function resolveFullOperationalData(
-            string $opdata,
-            string $resolved_opdata,
-            array $trigger_items,
-            array $event
-    ): string {
-        if (!$trigger_items || !function_exists('formatHistoryValue')) {
-            return $resolved_opdata;
-        }
-
-        $items = array_values($trigger_items);
-        $has_item_macros = preg_match('/\{ITEM\.(?:VALUE|LASTVALUE)(\d*)\}/', $opdata) === 1;
-
-        if (!$has_item_macros) {
-            return $resolved_opdata;
-        }
-
-        $full_opdata = $resolved_opdata;
-        $replaced = false;
-
-        preg_replace_callback(
-            '/\{ITEM\.(VALUE|LASTVALUE)(\d*)\}/',
-            static function (array $matches) use ($items, $event, &$full_opdata, &$replaced): string {
-                $index = ($matches[2] !== '') ? ((int) $matches[2] - 1) : 0;
-
-                if (!array_key_exists($index, $items)) {
-                    return $matches[0];
-                }
-
-                $item = $items[$index];
-
-                if ((int) ($item['value_type'] ?? -1) === ITEM_VALUE_TYPE_BINARY) {
-                    return _('binary value');
-                }
-
-                if (!array_key_exists('valuemap', $item) || !is_array($item['valuemap'])) {
-                    $item['valuemap'] = [];
-                }
-
-                if (!array_key_exists('lastvalue', $item)) {
-                    return $matches[0];
-                }
-
-                $value = $item['lastvalue'];
-
-                if ($matches[1] === 'VALUE' && array_key_exists('clock', $event)) {
-                    $history = Manager::History()->getValueAt($item, (int) $event['clock'], (int) ($event['ns'] ?? 0));
-
-                    if (is_array($history) && array_key_exists('value', $history)) {
-                        $value = $history['value'];
-                    }
-                }
-
-                $trimmed_value = formatHistoryValue($value, $item);
-                $full_value = formatHistoryValue($value, $item, false);
-
-                if ($trimmed_value !== $full_value && str_contains($full_opdata, $trimmed_value)) {
-                    $full_opdata = str_replace($trimmed_value, $full_value, $full_opdata);
-                    $replaced = true;
-                }
-
-                return $matches[0];
-            },
-            $opdata
-        );
-
-        return $replaced ? $full_opdata : $resolved_opdata;
     }
 
     private function getSystemMetricsAtEventTime($host, $event_timestamp) {

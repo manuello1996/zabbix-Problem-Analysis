@@ -133,18 +133,6 @@ function formatAnalistHistoryValue($value, array $item): string {
 
 function createOperationalDataSection(array $operational_data): CDiv {
     $section = (new CDiv())->addClass('operational-data-section');
-    $section->addItem(new CTag('h4', false, _('Ops Data')));
-
-    $opdata = $operational_data['value'] ?? '';
-
-    if (is_string($opdata) && trim($opdata) !== '') {
-        $table = new CTableInfo();
-        $table->setHeader([_('Operational Data')]);
-        $table->addRow([(new CCol($opdata))->addClass(ZBX_STYLE_WORDBREAK)]);
-        $section->addItem($table);
-
-        return $section;
-    }
 
     $history = $operational_data['history'] ?? [];
     $table = new CTableInfo();
