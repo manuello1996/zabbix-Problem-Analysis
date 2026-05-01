@@ -503,19 +503,22 @@ class CControllerAnalistProblemPopup extends CController {
         $opdata = trim((string) ($trigger['opdata'] ?? ''));
 
         if ($opdata !== '') {
-            $resolved_opdata = CMacrosResolverHelper::resolveTriggerOpdata(
-                [
-                    'triggerid' => $trigger['triggerid'],
-                    'expression' => $trigger['expression'],
-                    'opdata' => $trigger['opdata'],
-                    'clock' => (int) ($event['clock'] ?? time()),
-                    'ns' => (int) ($event['ns'] ?? 0)
-                ],
-                [
-                    'events' => true,
-                    'html' => true
-                ]
-            );
+            $event_opdata = trim((string) ($event['opdata'] ?? ''));
+            $resolved_opdata = $event_opdata !== ''
+                ? (string) $event['opdata']
+                : CMacrosResolverHelper::resolveTriggerOpdata(
+                    [
+                        'triggerid' => $trigger['triggerid'],
+                        'expression' => $trigger['expression'],
+                        'opdata' => $trigger['opdata'],
+                        'clock' => (int) ($event['clock'] ?? time()),
+                        'ns' => (int) ($event['ns'] ?? 0)
+                    ],
+                    [
+                        'events' => true,
+                        'html' => false
+                    ]
+                );
             $data['value'] = $this->resolveFullOperationalData($opdata, $resolved_opdata, $trigger_items, $event);
 
             return $data;
