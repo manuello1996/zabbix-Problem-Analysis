@@ -10,6 +10,7 @@ use CController;
 use CControllerResponseData;
 use API;
 use CArrayHelper;
+use CMacrosResolverHelper;
 use CSettingsHelper;
 use CSeverityHelper;
 use Manager;
@@ -64,7 +65,7 @@ class CControllerAnalistProblemPopup extends CController {
         // Get event details
         $events = API::Event()->get([
             'output' => ['eventid', 'source', 'object', 'objectid', 'clock', 'ns', 'value', 'acknowledged', 'name',
-                'severity', 'opdata'
+                'severity', 'opdata', 'r_eventid'
             ],
             'eventids' => $eventid,
             'selectTags' => ['tag', 'value']
@@ -83,9 +84,23 @@ class CControllerAnalistProblemPopup extends CController {
                 'source' => 0,
                 'object' => 0,
                 'objectid' => 0,
+                'r_eventid' => 0,
                 'opdata' => '',
                 'value' => 1
             ];
+        }
+
+        $recovery_eventid = (int) ($event['r_eventid'] ?? 0);
+
+        if ($recovery_eventid > 0) {
+            $recovery_events = API::Event()->get([
+                'output' => ['eventid', 'clock'],
+                'eventids' => $recovery_eventid
+            ]);
+
+            if ($recovery_events) {
+                $event['recovery_clock'] = $recovery_events[0]['clock'];
+            }
         }
 
         // Get trigger details - primeiro tenta com triggerid passado, senão extrai do evento
@@ -99,7 +114,9 @@ class CControllerAnalistProblemPopup extends CController {
 
         if ($actual_triggerid > 0) {
             $triggers = API::Trigger()->get([
-                'output' => ['triggerid', 'description', 'expression', 'comments', 'priority', 'opdata', 'manual_close'],
+                'output' => ['triggerid', 'description', 'expression', 'comments', 'priority', 'opdata', 'manual_close',
+                    'recovery_mode', 'recovery_expression', 'type', 'status'
+                ],
                 'triggerids' => $actual_triggerid,
                 'selectHosts' => ['hostid', 'host', 'name'],
                 'selectItems' => ['itemid', 'hostid', 'name', 'key_'], // This will get all items with itemid
@@ -489,7 +506,32 @@ class CControllerAnalistProblemPopup extends CController {
             'history' => []
         ];
 
-        if (!$trigger || !$trigger_items) {
+        if (!$trigger) {
+            return $data;
+        }
+
+        $opdata = trim((string) ($trigger['opdata'] ?? ''));
+
+        if ($opdata !== '') {
+            $event_opdata = trim((string) ($event['opdata'] ?? ''));
+            $data['value'] = $event_opdata !== ''
+                ? (string) $event['opdata']
+                : CMacrosResolverHelper::resolveTriggerOpdata(
+                    [
+                        'triggerid' => $trigger['triggerid'],
+                        'expression' => $trigger['expression'],
+                        'opdata' => $trigger['opdata'],
+                        'clock' => (int) ($event['clock'] ?? time()),
+                        'ns' => (int) ($event['ns'] ?? 0)
+                    ],
+                    [
+                        'events' => true,
+                        'html' => false
+                    ]
+                );
+        }
+
+        if (!$trigger_items) {
             return $data;
         }
 

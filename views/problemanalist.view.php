@@ -23,13 +23,45 @@ $operational_data = $data['operational_data'] ?? ['value' => '', 'history' => []
 
 // Format timestamps
 $event_time = isset($event['clock']) ? zbx_date2str(DATE_TIME_FORMAT_SECONDS, $event['clock']) : '';
-$event_date = isset($event['clock']) ? zbx_date2str('Y-m-d', $event['clock']) : '';
+$event_details_url = null;
+
+if ($event_time !== '' && isset($event['eventid'])) {
+    $event_triggerid = $trigger['triggerid'] ?? $event['objectid'] ?? null;
+
+    if ($event_triggerid !== null) {
+        $event_details_url = 'tr_events.php?triggerid='.$event_triggerid.'&eventid='.$event['eventid'];
+    }
+}
+
+$event_time_value = $event_details_url !== null
+    ? new CLink($event_time, $event_details_url)
+    : ($event_time ?: 'N/A');
 $time_ago = isset($event['clock']) ? zbx_date2age($event['clock']) : '';
+$is_resolved = !empty($event['r_eventid']);
+$recovery_time = isset($event['recovery_clock'])
+    ? zbx_date2str(DATE_TIME_FORMAT_SECONDS, (int) $event['recovery_clock'])
+    : '';
+$problem_duration = isset($event['clock'])
+    ? zbx_date2age((int) $event['clock'], isset($event['recovery_clock']) ? (int) $event['recovery_clock'] : 0)
+    : '';
 
 // Get severity info
 $severity = isset($event['severity']) ? (int) $event['severity'] : 0;
 $severity_name = CSeverityHelper::getName($severity);
 $severity_color = CSeverityHelper::getColor($severity);
+$is_acknowledged = (int) ($event['acknowledged'] ?? 0) === EVENT_ACKNOWLEDGED;
+$acknowledgement_value = (new CDiv([
+    (new CIcon(
+        $is_acknowledged ? ZBX_ICON_CHECK : ZBX_ICON_UNCHECK,
+        $is_acknowledged ? _('Acknowledged') : _('Unacknowledged')
+    ))->addClass($is_acknowledged ? ZBX_STYLE_COLOR_POSITIVE : ZBX_STYLE_COLOR_NEGATIVE),
+    new CSpan($is_acknowledged ? _('Acknowledged') : _('Unacknowledged'))
+]))->addClass('analist-detail-inline');
+$severity_value = (new CSpan($severity_name))
+    ->addClass(CSeverityHelper::getStyle($severity))
+    ->addClass('analist-severity-pill')
+    ->setAttribute('data-severity-color', $severity_color)
+    ->addStyle('border-color: #'.$severity_color.';');
 
 /**
  * Create essential metrics table for Zabbix Agent hosts
@@ -134,15 +166,26 @@ function formatAnalistHistoryValue($value, array $item): string {
 function createOperationalDataSection(array $operational_data): CDiv {
     $section = (new CDiv())->addClass('operational-data-section');
 
+    $opdata = $operational_data['value'] ?? '';
+
+    if (is_string($opdata) && trim($opdata) !== '') {
+        $opdata_table = new CTableInfo();
+        $opdata_table->setHeader([_('Operational Data')]);
+        $opdata_table->addRow([(new CCol($opdata))->addClass(ZBX_STYLE_WORDBREAK)]);
+        $opdata_table->addClass('operational-data-table');
+        $section->addItem($opdata_table);
+    }
+
     $history = $operational_data['history'] ?? [];
     $table = new CTableInfo();
+    $table->addClass('operational-history-table');
     $table->setHeader([
         (new CColHeader(_('Item')))->addStyle('width: 30%;'),
         (new CColHeader(_('Latest 3 Values')))->addStyle('width: 70%;')
     ]);
 
     if (!$history) {
-        $table->addRow([_('No operational data or item history available'), '']);
+        $table->addRow([_('No recent item history available'), '']);
         $section->addItem($table);
 
         return $section;
@@ -274,19 +317,19 @@ $tabs = (new CTabView())->setSelected(0);
 $overview_table = new CTableInfo();
 $overview_table->setHeader([_('Property'), _('Value')]);
 
+$overview_table->addRow([_('Event time'), $event_time_value]);
+$overview_table->addRow([_('Acknowledgement'), $acknowledgement_value]);
 $overview_table->addRow([_('Event ID'), $event['eventid'] ?? 'N/A']);
 $overview_table->addRow([_('Problem name'), $event['name'] ?? 'Unknown Problem']);
 $overview_table->addRow([_('Host'), $host ? ($host['name'] ?? $host['host'] ?? 'Unknown') : 'N/A']);
-$overview_table->addRow([_('Severity'),
-    (new CSpan($severity_name))
-        ->addClass(CSeverityHelper::getStyle($severity))
-        ->addClass('analist-severity-text')
-        ->setAttribute('data-severity-color', $severity_color)
-]);
-$overview_table->addRow([_('Time'), $event_time ?: 'N/A']);
-$overview_table->addRow([_('Date'), $event_date ?: 'N/A']);
-$overview_table->addRow([_('Time ago'), $time_ago ?: 'N/A']);
-$overview_table->addRow([_('Status'), ($event['acknowledged'] ?? 0) ? _('Acknowledged') : _('Problem')]);
+$overview_table->addRow([_('Status'), $is_resolved ? _('Resolved') : _('Problem')]);
+$overview_table->addRow([_('Severity'), $severity_value]);
+$overview_table->addRow([_('Age'), $time_ago ?: 'N/A']);
+
+if ($is_resolved) {
+    $overview_table->addRow([_('Recovery time'), $recovery_time ?: _('Unknown')]);
+    $overview_table->addRow([_('Duration'), $problem_duration ?: _('Unknown')]);
+}
 
 if ($trigger) {
     if (isset($trigger['expression'])) {

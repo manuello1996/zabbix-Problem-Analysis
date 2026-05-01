@@ -65,26 +65,55 @@
     margin: 0 0 10px;
 }
 
+.operational-data-table + .operational-history-table {
+    margin-top: 12px;
+}
+
 .operational-history-value {
     display: flex;
-    gap: 10px;
+    gap: 12px;
     align-items: baseline;
-    padding: 2px 0;
+    padding: 3px 0;
 }
 
 .operational-history-clock {
     flex: 0 0 155px;
     white-space: nowrap;
+    font-size: 11px;
+    line-height: 18px;
 }
 
 .operational-history-data {
     white-space: pre-wrap;
     overflow-wrap: anywhere;
+    line-height: 18px;
 }
 
 .operational-data-section td {
     white-space: pre-wrap;
     overflow-wrap: anywhere;
+}
+
+/* Compact status/severity indicators in the problem detail table. */
+.analist-detail-inline {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+}
+
+.analist-detail-inline .icon {
+    line-height: 1;
+}
+
+.analist-severity-pill {
+    display: inline-flex;
+    align-items: center;
+    min-height: 20px;
+    padding: 2px 8px;
+    border: 1px solid transparent;
+    border-radius: 3px;
+    font-weight: 600;
+    line-height: 16px;
 }
 
 /* Estilos para o botão LTS */
