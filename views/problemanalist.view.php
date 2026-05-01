@@ -140,7 +140,7 @@ function createOperationalDataSection(array $operational_data): CDiv {
     if (is_string($opdata) && trim($opdata) !== '') {
         $table = new CTableInfo();
         $table->setHeader([_('Operational Data')]);
-        $table->addRow([(new CCol($opdata))->addClass(ZBX_STYLE_WORDBREAK)]);
+        $table->addRow([(new CCol($opdata))]);
         $section->addItem($table);
 
         return $section;
