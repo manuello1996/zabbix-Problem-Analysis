@@ -69,7 +69,7 @@ class CControllerAnalistProblemPopup extends CController {
             ],
             'eventids' => $eventid,
             'selectTags' => ['tag', 'value'],
-            'select_acknowledges' => ['acknowledgeid', 'clock', 'action']
+            'selectAcknowledges' => ['acknowledgeid', 'clock', 'action']
         ]);
 
         $event = $events ? $events[0] : [];

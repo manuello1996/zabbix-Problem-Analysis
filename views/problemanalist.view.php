@@ -962,7 +962,7 @@ if (!empty($event['eventid'])) {
 	$ev = API::Event()->get([
 		'output' => ['eventid', 'r_eventid'],
 		'eventids' => $event['eventid'],
-		'select_acknowledges' => [
+		'selectAcknowledges' => [
 			'acknowledgeid','clock','userid','message','action',
 			'old_severity','new_severity','suppress_until'
 		],
