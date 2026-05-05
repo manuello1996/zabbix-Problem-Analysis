@@ -139,21 +139,24 @@ function createEssentialMetricsTable($metrics) {
     return $table;
 }
 
-function formatAnalistHistoryValue($value, array $item): string {
+function createAnalistHistoryValue($value, array $item) {
     if ((int) ($item['value_type'] ?? -1) === ITEM_VALUE_TYPE_BINARY) {
-        return _('binary value');
+        return italic(_('binary value'))->addClass(ZBX_STYLE_GREY);
     }
 
-    if (function_exists('formatHistoryValue')) {
-        if (!array_key_exists('valuemap', $item) || !is_array($item['valuemap'])) {
-            $item['valuemap'] = [];
-        }
-
-        return (string) formatHistoryValue($value, $item, false);
+    if (!array_key_exists('valuemap', $item) || !is_array($item['valuemap'])) {
+        $item['valuemap'] = [];
     }
 
-    $units = trim((string) ($item['units'] ?? ''));
-    return (string) $value . ($units !== '' ? ' '.$units : '');
+    if ((int) ($item['value_type'] ?? -1) === ITEM_VALUE_TYPE_FLOAT && function_exists('formatFloat')) {
+        $value = formatFloat($value, ['decimals' => ZBX_UNITS_ROUNDOFF_UNSUFFIXED]);
+    }
+
+    if (class_exists('CValueMapHelper')) {
+        $value = CValueMapHelper::applyValueMap((int) ($item['value_type'] ?? -1), $value, $item['valuemap']);
+    }
+
+    return new CPre(zbx_nl2br((string) $value));
 }
 
 function createOperationalDataSection(array $operational_data): CDiv {
@@ -196,8 +199,7 @@ function createOperationalDataSection(array $operational_data): CDiv {
 
             $value_lines[] = (new CDiv([
                 (new CSpan($clock))->addClass('grey')->addClass('operational-history-clock'),
-                (new CSpan(formatAnalistHistoryValue($value['value'] ?? '', $item)))
-                    ->addClass(ZBX_STYLE_WORDBREAK)
+                createAnalistHistoryValue($value['value'] ?? '', $item)
                     ->addClass('operational-history-data')
             ]))->addClass('operational-history-value');
         }

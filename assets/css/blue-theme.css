@@ -84,6 +84,7 @@
 }
 
 .operational-history-data {
+    margin: 0;
     white-space: pre-wrap;
     overflow-wrap: anywhere;
     line-height: 18px;
