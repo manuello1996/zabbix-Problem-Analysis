@@ -521,6 +521,17 @@
     color: white;
 }
 
+.service-status.status-not-classified,
+.service-status.status-unknown {
+    background: #737373;
+    color: white;
+}
+
+.service-status.status-information {
+    background: #7499ff;
+    color: #111;
+}
+
 .service-status.status-average {
     background: #f39c12;
     color: white;

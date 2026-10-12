@@ -398,124 +398,6 @@ $overview_container
 
 $overview_container->addItem(createOperationalDataSection($operational_data));
 
-$overview_monthly_comparison = $monthly_comparison;
-$monthly_comparison = [];
-$metrics_section = null;
-$top_sections_container = new CDiv();
-
-
-// Add monthly comparison section to the right side if data is available
-if (!empty($monthly_comparison)) {
-    $comparison_section = new CDiv();
-    $comparison_section->addClass('monthly-comparison-section');
-    $comparison_section->addStyle('flex: 1; min-width: 250px;');
-    $comparison_section->addItem(new CTag('h4', false, _('Monthly Comparison')));
-
-    $comparison_table = new CTableInfo();
-    $comparison_table->setHeader([_('Period'), _('Incidents'), _('Change')]);
-
-    if (!empty($monthly_comparison['months'])) {
-        // Render last 6 months (oldest -> newest for readability)
-        $months = $monthly_comparison['months'];
-
-        for ($i = count($months) - 1; $i >= 0; $i--) {
-            $m   = $months[$i];
-            $chg = $m['change_percentage'];
-
-            // Determine change color/icon
-            $change_color = '#666666';
-            $change_icon  = '→';
-            $change_text  = ($chg === null) ? '-' : (($chg > 0) ? ('+' . $chg . '%') : ($chg . '%'));
-
-            if ($chg !== null) {
-                if ($chg > 0) {
-                    $change_color = '#e74c3c'; // increase
-                    $change_icon  = '↗';
-                }
-                elseif ($chg < 0) {
-                    $change_color = '#27ae60'; // decrease
-                    $change_icon  = '↘';
-                }
-            }
-
-            $comparison_table->addRow([
-                $m['name'],
-                $m['count'],
-                ($chg === null)
-                    ? '-'
-                    : (new CSpan($change_icon . ' ' . $change_text))
-                        ->addStyle("color: {$change_color}; font-weight: bold;")
-            ]);
-        }
-
-        // Optional summary for the latest month vs previous
-        $latest_chg = $monthly_comparison['change_percentage'] ?? 0;
-        if ($latest_chg != 0) {
-            $change_color = ($latest_chg > 0) ? '#e74c3c' : '#27ae60';
-            $trend_message = ($latest_chg > 0)
-                ? (_('Incidents increased by') . ' ' . abs($latest_chg) . '% ' . _('compared to previous month'))
-                : (_('Incidents decreased by') . ' ' . abs($latest_chg) . '% ' . _('compared to previous month'));
-
-            $summary = new CDiv($trend_message);
-            $summary->addStyle("color: {$change_color}; font-style: italic; margin-top: 10px; font-size: 12px;");
-            $comparison_section->addItem($comparison_table);
-            $comparison_section->addItem($summary);
-        }
-        else {
-            $comparison_section->addItem($comparison_table);
-        }
-    }
-    // Fallback: old 2-month view (kept intact)
-    elseif (!empty($monthly_comparison['current_month'])) {
-        $current_month    = $monthly_comparison['current_month'];
-        $previous_month   = $monthly_comparison['previous_month'];
-        $change_percentage= $monthly_comparison['change_percentage'] ?? 0;
-
-        $change_color = '#666666'; // Neutral
-        $change_icon  = '→';
-        $change_text  = '0%';
-
-        if ($change_percentage > 0) {
-            $change_color = '#e74c3c';
-            $change_icon  = '↗';
-            $change_text  = '+' . $change_percentage . '%';
-        }
-        elseif ($change_percentage < 0) {
-            $change_color = '#27ae60';
-            $change_icon  = '↘';
-            $change_text  = $change_percentage . '%';
-        }
-
-        $comparison_table->addRow([$previous_month['name'], $previous_month['count'], '-']);
-        $comparison_table->addRow([
-            $current_month['name'],
-            $current_month['count'],
-            (new CSpan($change_icon . ' ' . $change_text))->addStyle("color: {$change_color}; font-weight: bold;")
-        ]);
-
-        $comparison_section->addItem($comparison_table);
-
-        if ($change_percentage != 0) {
-            $trend_message = ($change_percentage > 0)
-                ? (_('Incidents increased by') . ' ' . abs($change_percentage) . '% ' . _('compared to previous month'))
-                : (_('Incidents decreased by') . ' ' . abs($change_percentage) . '% ' . _('compared to previous month'));
-
-            $summary = new CDiv($trend_message);
-            $summary->addStyle("color: {$change_color}; font-style: italic; margin-top: 10px; font-size: 12px;");
-            $comparison_section->addItem($summary);
-        }
-    }
-
-    $top_sections_container->addItem($comparison_section);
-}
-
-
-
-// Add the top sections container to overview if it has content
-if ($metrics_section || (!empty($monthly_comparison) && !empty($monthly_comparison['current_month']))) {
-    $overview_container->addItem($top_sections_container);
-}
-
 $problem_detail_section = new CDiv();
 $problem_detail_section->addClass('problem-detail-section');
 $problem_detail_section->addItem(new CTag('h4', false, _('Problem details')));
@@ -630,7 +512,7 @@ $tabs->addTab('host', _('Host Info'), $host_div);
 $timeline_div = new CDiv();
 $timeline_div->addClass('timeline-tab');
 
-$timeline_comparison_section = createMonthlyComparisonSection($overview_monthly_comparison);
+$timeline_comparison_section = createMonthlyComparisonSection($monthly_comparison);
 if ($timeline_comparison_section !== null) {
     $timeline_div->addItem($timeline_comparison_section);
 }
@@ -678,7 +560,7 @@ $monthly_daily_details = [];
 
 $current_time = isset($event['clock']) ? (int) $event['clock'] : time();
 for ($i = 11; $i >= 0; $i--) {
-    $ts = strtotime("-$i months", $current_time);
+    $ts = strtotime("-$i months", strtotime(date('Y-m-01 00:00:00', $current_time)));
     $mk = date('Y-m', $ts);
     $month_keys[] = $mk;
     $monthly_data[$mk] = 0;
@@ -727,6 +609,19 @@ foreach ($month_keys as $mk) {
 }
 
 $event_clocks = array_column($pattern_events, 'clock');
+// Use the same user/frontend timezone for PHP charts and interactive browser filters.
+$event_slots = [];
+foreach ($event_clocks as $clock) {
+    $event_slots[(string) $clock] = [
+        'hour' => (int) date('G', $clock),
+        'weekday' => (int) date('w', $clock),
+        'month' => date('Y-m', $clock),
+        'day' => (int) date('j', $clock),
+        'date' => date('Y-m-d', $clock)
+    ];
+}
+$pattern_week_end = strtotime('monday this week 00:00:00', $current_time);
+$pattern_week_start = strtotime('-1 week', $pattern_week_end);
 
 // Create containers for D3.js charts
 $patterns_container = new CDiv();
@@ -955,329 +850,22 @@ $tabs->addTab('graphs', _('Graphs'), $graphs_div);
 $update_div = new CDiv();
 $update_div->addClass('update-tab');
 
-// --- Built-in Actions table, augmented with manual-close + recovery alerts ---
+// The native collector includes all manual updates, recovery events and recovery alerts.
 if (!empty($event['eventid'])) {
-	// 0) Canonical payload (same collector as tr_events.php).
-	$actions = getEventDetailsActions($event);
-
-	// Fetch ACKs (comments / close / ack/unack / suppress) and recovery event id.
-	$ev = API::Event()->get([
-		'output' => ['eventid', 'r_eventid'],
-		'eventids' => $event['eventid'],
-		'selectAcknowledges' => [
-			'acknowledgeid','clock','userid','message','action',
-			'old_severity','new_severity','suppress_until'
-		],
-		'preservekeys' => true
-	]);
-
-	$acks = !empty($ev[$event['eventid']]['acknowledges']) ? $ev[$event['eventid']]['acknowledges'] : [];
-	$r_eventid = (int)($ev[$event['eventid']]['r_eventid'] ?? 0);
-
-	// 1) Resolve users referenced in built-in actions AND in ACKs.
-	$userids = [];
-	if (!empty($actions['userids'])) {
-		foreach ($actions['userids'] as $uid => $_) {
-			$userids[(int)$uid] = true;
-		}
-	}
-	foreach ($acks as $a) {
-		if (!empty($a['userid'])) {
-			$userids[(int)$a['userid']] = true;
-		}
-	}
-
-	$users_by_id = [];
-	if ($userids) {
-		$users_full = API::User()->get([
-			'output'       => ['userid','alias','name','surname'],
-			'userids'      => array_keys($userids),
-			'preservekeys' => true
-		]);
-
-		foreach ($users_full as $uid => $u) {
-			$fullname = trim(($u['name'] ?? '').' '.($u['surname'] ?? ''));
-			$users_by_id[(int)$uid] = ($fullname !== '') ? $fullname : ($u['alias'] ?? ('#'.$uid));
-		}
-	}
-
-	// Ensure the renderer knows about these users.
-	foreach (array_keys($users_by_id) as $uid) {
-		$actions['userids'][(int)$uid] = 1;
-	}
-
-	// Helper: set of existing manual-update ACK IDs (to avoid duplicates).
-	$present_ack_ids = [];
-	if (!empty($actions['actions'])) {
-		foreach ($actions['actions'] as $row) {
-			if (($row['action_type'] ?? null) === ZBX_EVENT_HISTORY_MANUAL_UPDATE && !empty($row['acknowledgeid'])) {
-				$present_ack_ids[(int)$row['acknowledgeid']] = true;
-			}
-		}
-	}
-
-	// Helper: push a MANUAL UPDATE row (Action column icons rely on 'action' bitmask).
-	$pushManualUpdate = static function(array &$actions, array $ack, int $bits, string $message, int $uid = 0): void {
-		$actions['actions'][] = [
-			'action_type'    => ZBX_EVENT_HISTORY_MANUAL_UPDATE,
-			'clock'          => (int)$ack['clock'],
-			'message'        => $message, // goes to "Message/Command" column
-			'acknowledgeid'  => (int)($ack['acknowledgeid'] ?? 0),
-			'esc_step'       => '',
-			'p_eventid'      => 0,
-			'userid'         => $uid,
-			'action'         => $bits, // bitmask drives the Action icons
-
-			// pass-through (used if present; harmless otherwise)
-			'old_severity'   => $ack['old_severity']   ?? null,
-			'new_severity'   => $ack['new_severity']   ?? null,
-			'suppress_until' => $ack['suppress_until'] ?? null
-		];
-	};
-
-	// 2) ACK / UNACK rows (no comment needed).
-	foreach ($acks as $ack) {
-		$ackid = (int)($ack['acknowledgeid'] ?? 0);
-		if ($ackid && !empty($present_ack_ids[$ackid])) {
-			continue; // already present
-		}
-
-		$bits  = (int)($ack['action'] ?? 0);
-		$uid   = (int)($ack['userid'] ?? 0);
-		$uname = $users_by_id[$uid] ?? _('Inaccessible user');
-
-		if (($bits & ZBX_PROBLEM_UPDATE_ACKNOWLEDGE) === ZBX_PROBLEM_UPDATE_ACKNOWLEDGE) {
-			$pushManualUpdate($actions, $ack, $bits, _s('Acknowledged by "%1$s"', $uname), $uid);
-			if ($uid > 0) $actions['userids'][$uid] = 1;
-			if ($ackid)   $present_ack_ids[$ackid] = true;
-			continue; // keep one semantic per ack (as in your code)
-		}
-
-		if (($bits & ZBX_PROBLEM_UPDATE_UNACKNOWLEDGE) === ZBX_PROBLEM_UPDATE_UNACKNOWLEDGE) {
-			$pushManualUpdate($actions, $ack, $bits, _s('Unacknowledged by "%1$s"', $uname), $uid);
-			if ($uid > 0) $actions['userids'][$uid] = 1;
-			if ($ackid)   $present_ack_ids[$ackid] = true;
-			continue;
-		}
-	}
-
-	// 3) ACKs with message (user comments).
-	foreach ($acks as $ack) {
-		$ackid = (int)($ack['acknowledgeid'] ?? 0);
-		$msg   = trim((string)($ack['message'] ?? ''));
-		$uid   = (int)($ack['userid'] ?? 0);
-		$bits  = (int)($ack['action'] ?? 0);
-
-		if ($msg !== '' && empty($present_ack_ids[$ackid])) {
-			$actions['actions'][] = [
-				'action_type'    => ZBX_EVENT_HISTORY_MANUAL_UPDATE,
-				'clock'          => (int)$ack['clock'],
-				'message'        => $msg,
-				'acknowledgeid'  => $ackid,
-				'esc_step'       => '',
-				'p_eventid'      => 0,
-				'userid'         => $uid,
-
-				// carry bitmask so icons render (fallback to MESSAGE bit)
-				'action'         => $bits ?: ZBX_PROBLEM_UPDATE_MESSAGE,
-
-				'old_severity'   => $ack['old_severity']   ?? null,
-				'new_severity'   => $ack['new_severity']   ?? null,
-				'suppress_until' => $ack['suppress_until'] ?? null
-			];
-
-			if ($uid > 0) $actions['userids'][$uid] = 1;
-			// do not mark $present_ack_ids here on purpose (matches your original behavior)
-		}
-	}
-
-	// 4) Suppress / Unsuppress entries (include "till" in message if present).
-	foreach ($acks as $ack) {
-		$ackid = (int)($ack['acknowledgeid'] ?? 0);
-		if ($ackid && !empty($present_ack_ids[$ackid])) {
-			continue;
-		}
-
-		$bits  = (int)($ack['action'] ?? 0);
-		$uid   = (int)($ack['userid'] ?? 0);
-		$uname = $users_by_id[$uid] ?? _('Inaccessible user');
-
-		// SUPPRESS
-		if (($bits & ZBX_PROBLEM_UPDATE_SUPPRESS) === ZBX_PROBLEM_UPDATE_SUPPRESS) {
-			$supp_until = $ack['suppress_until'] ?? null;
-			$supp_text  = _('Suppressed');
-
-			if ($supp_until !== null) {
-				$supp_until = (int)$supp_until;
-				$supp_text .= ' '._s('till: %1$s',
-					($supp_until < strtotime('tomorrow') && $supp_until > strtotime('today'))
-						? zbx_date2str(TIME_FORMAT,  $supp_until)
-						: zbx_date2str(DATE_TIME_FORMAT, $supp_until)
-				);
-			}
-
-			$actions['actions'][] = [
-				'action_type'    => ZBX_EVENT_HISTORY_MANUAL_UPDATE,
-				'clock'          => (int)$ack['clock'],
-				'message'        => _s('%1$s by "%2$s"', $supp_text, $uname),
-				'acknowledgeid'  => $ackid,
-				'esc_step'       => '',
-				'p_eventid'      => 0,
-				'userid'         => $uid,
-				'action'         => $bits ?: ZBX_PROBLEM_UPDATE_SUPPRESS,
-				'suppress_until' => $ack['suppress_until'] ?? null
-			];
-
-			if ($uid > 0) $actions['userids'][$uid] = 1;
-			if ($ackid)   $present_ack_ids[$ackid] = true;
-			continue;
-		}
-
-		// UNSUPPRESS
-		if (($bits & ZBX_PROBLEM_UPDATE_UNSUPPRESS) === ZBX_PROBLEM_UPDATE_UNSUPPRESS) {
-			$actions['actions'][] = [
-				'action_type'    => ZBX_EVENT_HISTORY_MANUAL_UPDATE,
-				'clock'          => (int)$ack['clock'],
-				'message'        => _s('Unsuppressed by "%1$s"', $uname),
-				'acknowledgeid'  => $ackid,
-				'esc_step'       => '',
-				'p_eventid'      => 0,
-				'userid'         => $uid,
-				'action'         => $bits ?: ZBX_PROBLEM_UPDATE_UNSUPPRESS
-			];
-
-			if ($uid > 0) $actions['userids'][$uid] = 1;
-			if ($ackid)   $present_ack_ids[$ackid] = true;
-			continue;
-		}
-	}
-
-	// 5) Manual close (no message) → "Resolved by "<user>"", CLOSE bit set.
-	foreach ($acks as $ack) {
-		$bits = (int)($ack['action'] ?? 0);
-		$msg  = trim((string)($ack['message'] ?? ''));
-
-		if ($bits === 1 && $msg === '') { // or: ($bits & ZBX_PROBLEM_UPDATE_CLOSE)
-			$uid   = (int)($ack['userid'] ?? 0);
-			$uname = $users_by_id[$uid] ?? _('Inaccessible user');
-
-			$actions['actions'][] = [
-				'action_type'    => ZBX_EVENT_HISTORY_MANUAL_UPDATE,
-				'clock'          => (int)$ack['clock'],
-				'message'        => _s('Resolved by "%1$s"', $uname),
-				'acknowledgeid'  => 0,
-				'esc_step'       => '',
-				'p_eventid'      => 0,
-				'userid'         => $uid,
-				'action'         => ($bits ?: 0) | ZBX_PROBLEM_UPDATE_CLOSE
-			];
-
-			if ($uid > 0) $actions['userids'][$uid] = 1;
-		}
-	}
-
-	// 6) Recovery alerts (so "resolved" notifications appear).
-	if ($r_eventid > 0) {
-		$recovery_alerts = API::Alert()->get([
-			'output'    => ['clock','mediatypeid','sendto','status','error','subject','message','userid'],
-			'eventids'  => [$r_eventid],
-			'sortfield' => 'clock',
-			'sortorder' => 'ASC'
-		]);
-
-		foreach ($recovery_alerts as $al) {
-			$mtid = (int)($al['mediatypeid'] ?? 0);
-			$uid  = (int)($al['userid'] ?? 0);
-
-			$actions['actions'][] = [
-				'action_type'    => ZBX_EVENT_HISTORY_ALERT,
-				'alerttype'      => ALERT_TYPE_MESSAGE,
-				'clock'          => (int)$al['clock'],
-				'subject'        => (string)($al['subject'] ?? ''),
-				'message'        => (string)($al['message'] ?? ''),
-				'status'         => (int)($al['status'] ?? 0),
-				'error'          => (string)($al['error'] ?? ''),
-				'sendto'         => (string)($al['sendto'] ?? ''),
-				'mediatypeid'    => $mtid,
-				'userid'         => $uid,
-				'p_eventid'      => 1,  // non-problem event
-				'acknowledgeid'  => 0,
-				'esc_step'       => ''
-			];
-
-			if ($mtid > 0) $actions['mediatypeids'][$mtid] = 1;
-			if ($uid > 0)  $actions['userids'][(int)$uid] = 1;
-		}
-	}
-
-	// 7) "Problem resolved" (even if no recovery alerts were sent).
-	if ($r_eventid > 0) {
-		$r_ev = API::Event()->get([
-			'output'       => ['eventid', 'clock', 'userid'],
-			'eventids'     => [$r_eventid],
-			'preservekeys' => true
-		]);
-
-		if (!empty($r_ev[$r_eventid])) {
-			$r_clock = (int)$r_ev[$r_eventid]['clock'];
-			$r_uid   = (int)($r_ev[$r_eventid]['userid'] ?? 0);
-
-			$actions['actions'][] = [
-				'action_type'    => ZBX_EVENT_HISTORY_RECOVERY_EVENT,
-				'clock'          => $r_clock,
-				'message'        => _s('Problem resolved'),
-				'acknowledgeid'  => 0,
-				'esc_step'       => '',
-				'p_eventid'      => 1,
-				'userid'         => $r_uid,
-				'action'         => ZBX_PROBLEM_UPDATE_MESSAGE
-			];
-
-			if ($r_uid > 0) $actions['userids'][$r_uid] = 1;
-		}
-	}
-
-	// 8) Sort newest first.
-	if (!empty($actions['actions'])) {
-		usort($actions['actions'], static function($a, $b) {
-			return ($b['clock'] ?? 0) <=> ($a['clock'] ?? 0);
-		});
-	}
-
-	// 9) (Re)load USERS and MEDIATYPES maps for the renderer.
-	$users = [];
-	if (!empty($actions['userids'])) {
-		$users = API::User()->get([
-			'output'       => ['username','name','surname'],
-			'userids'      => array_keys($actions['userids']),
-			'preservekeys' => true
-		]);
-	}
-
-	$mediatypes = [];
-	if (!empty($actions['mediatypeids'])) {
-		$mediatypes = API::Mediatype()->get([
-			'output'        => ['name','maxattempts','type'],
-			'mediatypeids'  => array_keys($actions['mediatypeids']),
-			'preservekeys'  => true
-		]);
-	}
-
-	// 10) Render same built-in table (tr_events.php).
-	$actions_section = (new CSectionCollapsible(
-		makeEventDetailsActionsTable($actions, $users, $mediatypes)
-	))
-		->setHeader(new CTag('h4', true, _('Actions')))
-		->setExpanded(true);
-
-	$update_div->addItem($actions_section);
-}
-else {
-	$update_div->addItem(
-		(new CSpan(_('No event selected.')))
-			->addClass(ZBX_STYLE_DISABLED)
-			->addStyle('display: block;')
-	);
+    $actions = getEventDetailsActions($event);
+    $users = !empty($actions['userids']) ? API::User()->get([
+        'output' => ['username', 'name', 'surname'],
+        'userids' => array_keys($actions['userids']),
+        'preservekeys' => true
+    ]) : [];
+    $mediatypes = !empty($actions['mediatypeids']) ? API::Mediatype()->get([
+        'output' => ['name', 'maxattempts', 'type'],
+        'mediatypeids' => array_keys($actions['mediatypeids']),
+        'preservekeys' => true
+    ]) : [];
+    $update_div->addItem((new CSectionCollapsible(
+        makeEventDetailsActionsTable($actions, $users, $mediatypes)
+    ))->setHeader(new CTag('h4', true, _('Actions')))->setExpanded(true));
 }
 
 // Add the tab.
@@ -1322,6 +910,9 @@ $output = [
             var hourLabels = ' . json_encode($hour_labels) . ';
             var timePatternData = {
                 eventClocks: ' . json_encode($event_clocks) . ',
+                eventSlots: ' . json_encode($event_slots) . ',
+                lastWeekStart: ' . $pattern_week_start . ',
+                lastWeekEnd: ' . $pattern_week_end . ',
                 monthKeys: ' . json_encode($month_keys) . ',
                 monthLabels: ' . json_encode($monthly_labels) . ',
                 dayLabels: ' . json_encode(range(1, 31)) . ',
@@ -1337,14 +928,24 @@ $output = [
             };
 
             // Event data for services loading
-            window.currentEventData = {
-                eventid: "' . ($event['eventid'] ?? '') . '",
-                hostname: "' . ($host['name'] ?? $host['host'] ?? '') . '",
-                hostid: "' . ($host['hostid'] ?? '') . '",
-                triggerid: "' . ($trigger['triggerid'] ?? '') . '",
-                problem_name: "' . addslashes($event['name'] ?? '') . '",
-                severity: "' . ($event['severity'] ?? 0) . '"
-            };
+            window.currentEventData = ' . json_encode([
+                'eventid' => $event['eventid'] ?? '',
+                'hostname' => $host['name'] ?? $host['host'] ?? '',
+                'hostid' => $host['hostid'] ?? '',
+                'triggerid' => $trigger['triggerid'] ?? '',
+                'problem_name' => $event['name'] ?? '',
+                'severity' => $event['severity'] ?? 0
+            ], JSON_HEX_TAG | JSON_HEX_AMP | JSON_HEX_APOS | JSON_HEX_QUOT) . ';
+            var serviceStatusLabels = ' . json_encode([
+                ZBX_SEVERITY_OK => _('OK'),
+                TRIGGER_SEVERITY_NOT_CLASSIFIED => CSeverityHelper::getName(TRIGGER_SEVERITY_NOT_CLASSIFIED),
+                TRIGGER_SEVERITY_INFORMATION => CSeverityHelper::getName(TRIGGER_SEVERITY_INFORMATION),
+                TRIGGER_SEVERITY_WARNING => CSeverityHelper::getName(TRIGGER_SEVERITY_WARNING),
+                TRIGGER_SEVERITY_AVERAGE => CSeverityHelper::getName(TRIGGER_SEVERITY_AVERAGE),
+                TRIGGER_SEVERITY_HIGH => CSeverityHelper::getName(TRIGGER_SEVERITY_HIGH),
+                TRIGGER_SEVERITY_DISASTER => CSeverityHelper::getName(TRIGGER_SEVERITY_DISASTER)
+            ], JSON_HEX_TAG | JSON_HEX_AMP | JSON_HEX_APOS | JSON_HEX_QUOT) . ';
+
 
             // Function to create D3.js bar charts or fallback
             var createPatternCharts = function() {
@@ -1553,11 +1154,11 @@ $output = [
 
                     for (var i = 0; i < clockList.length; i++) {
                         var t = clockList[i];
-                        var dt = new Date(t * 1000);
-                        var hour = dt.getHours();
-                        var weekday = dt.getDay();
-                        var ym = dt.getFullYear() + "-" + String(dt.getMonth() + 1).padStart(2, "0");
-                        var dIdx = dt.getDate() - 1;
+                        var dt = d.eventSlots[t];
+                        var hour = dt.hour;
+                        var weekday = dt.weekday;
+                        var ym = dt.month;
+                        var dIdx = dt.day - 1;
 
                         hourly[hour]++;
                         weekly[weekday]++;
@@ -1629,8 +1230,8 @@ $output = [
                         var weekday = parseInt(center.data("w"), 10);
                         var hour = parseInt(center.data("h"), 10);
                         var filtered = clocks.filter(function(t) {
-                            var dt = new Date(t * 1000);
-                            return dt.getDay() === weekday && dt.getHours() === hour;
+                            var dt = d.eventSlots[t];
+                            return dt.weekday === weekday && dt.hour === hour;
                         });
                         currentFilter = {type: "heatmap", weekday: weekday, hour: hour};
                         currentAgg = computeAggregates(filtered);
@@ -1684,17 +1285,15 @@ $output = [
                 };
 
                 var countSameSlotLastWeek = function(weekday, hour) {
-                    var now = Math.floor(Date.now() / 1000);
-                    var weekSec = 604800;
-                    var lastWeekEnd = now - weekSec;
-                    var lastWeekStart = lastWeekEnd - weekSec;
+                    var lastWeekEnd = d.lastWeekEnd;
+                    var lastWeekStart = d.lastWeekStart;
                     var n = 0;
 
                     for (var i = 0; i < clocks.length; i++) {
                         var t = clocks[i];
                         if (t >= lastWeekStart && t < lastWeekEnd) {
-                            var dt = new Date(t * 1000);
-                            if (dt.getDay() === weekday && dt.getHours() === hour) n++;
+                            var dt = d.eventSlots[t];
+                            if (dt.weekday === weekday && dt.hour === hour) n++;
                         }
                     }
 
@@ -1702,17 +1301,15 @@ $output = [
                 };
 
                 var countSameDayLastWeek = function(weekday) {
-                    var now = Math.floor(Date.now() / 1000);
-                    var weekSec = 604800;
-                    var lastWeekEnd = now - weekSec;
-                    var lastWeekStart = lastWeekEnd - weekSec;
+                    var lastWeekEnd = d.lastWeekEnd;
+                    var lastWeekStart = d.lastWeekStart;
                     var n = 0;
 
                     for (var i = 0; i < clocks.length; i++) {
                         var t = clocks[i];
                         if (t >= lastWeekStart && t < lastWeekEnd) {
-                            var dt = new Date(t * 1000);
-                            if (dt.getDay() === weekday) n++;
+                            var dt = d.eventSlots[t];
+                            if (dt.weekday === weekday) n++;
                         }
                     }
 
@@ -1774,8 +1371,8 @@ $output = [
                         if (!mk) return;
 
                         var filtered = clocks.filter(function(t) {
-                            var dt = new Date(t * 1000);
-                            return dt.getFullYear() + "-" + String(dt.getMonth() + 1).padStart(2, "0") === mk;
+                            var dt = d.eventSlots[t];
+                            return dt.month === mk;
                         });
                         currentFilter = {type: "month", value: idx};
                         currentAgg = computeAggregates(filtered);
@@ -1796,14 +1393,14 @@ $output = [
 
                             var dateStr = mk + "-" + String(day).padStart(2, "0");
                             var dayFiltered = clocks.filter(function(t) {
-                                var dt = new Date(t * 1000);
-                                var ds = dt.getFullYear() + "-" + String(dt.getMonth() + 1).padStart(2, "0") + "-" + String(dt.getDate()).padStart(2, "0");
+                                var dt = d.eventSlots[t];
+                                var ds = dt.date;
                                 return ds === dateStr;
                             });
 
                             var parts = dateStr.split("-");
-                            var sampleDate = new Date(parseInt(parts[0], 10), parseInt(parts[1], 10) - 1, parseInt(parts[2], 10));
-                            var weekday = sampleDate.getDay();
+                            var sampleDate = new Date(Date.UTC(parseInt(parts[0], 10), parseInt(parts[1], 10) - 1, parseInt(parts[2], 10)));
+                            var weekday = sampleDate.getUTCDay();
                             var hourly = [];
                             var wh = [];
                             for (var h = 0; h < 24; h++) hourly[h] = 0;
@@ -1812,8 +1409,8 @@ $output = [
                                 for (h = 0; h < 24; h++) wh[w][h] = 0;
                             }
                             for (var cIdx = 0; cIdx < dayFiltered.length; cIdx++) {
-                                var dtf = new Date(dayFiltered[cIdx] * 1000);
-                                hourly[dtf.getHours()]++;
+                                var dtf = d.eventSlots[dayFiltered[cIdx]];
+                                hourly[dtf.hour]++;
                             }
                             for (h = 0; h < 24; h++) wh[weekday][h] = hourly[h];
 
@@ -2128,413 +1725,161 @@ $output = [
             /**
              * Fetch services related to this event using AnalistProblem API
              */
+            function escapeServiceHtml(value) {
+                return String(value ?? "").replace(/&/g, "&amp;").replace(/</g, "&lt;")
+                    .replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/\\x27/g, "&#39;");
+            }
+
+            async function requestServices(parameters) {
+                const response = await fetch("zabbix.php?action=problemanalist.service.get", {
+                    method: "POST", body: new URLSearchParams(parameters)
+                });
+                if (!response.ok) throw new Error("HTTP error! status: " + response.status);
+                const result = await response.json();
+                if (!result || !result.success || result.data === undefined) {
+                    throw new Error(result?.error?.message || "Unable to load services");
+                }
+                return result.data;
+            }
+
             async function fetchRelatedServices(eventData) {
-                try {
-
-
-                    const formData = new FormData();
-                    formData.append("output", "extend");
-                    formData.append("selectParents", "extend");
-                    formData.append("selectChildren", "extend");
-                    formData.append("selectTags", "extend");
-                    formData.append("selectProblemTags", "extend");
-
-                    // Add event-specific filters
-                    if (eventData.hostname) {
-                        formData.append("hostname", eventData.hostname);
-
-                    }
-                    if (eventData.eventid) {
-                        formData.append("eventid", eventData.eventid);
-
-                    }
-                    if (eventData.hostid) {
-                        formData.append("hostid", eventData.hostid);
-
-                    }
-                    if (eventData.triggerid) {
-                        formData.append("triggerid", eventData.triggerid);
-
-                    }
-
-
-
-                    const response = await fetch("zabbix.php?action=problemanalist.service.get", {
-                        method: "POST",
-                        body: formData
-                    });
-
-
-                    if (!response.ok) {
-                        const errorText = await response.text();
-                        console.error(" HTTP Error Response:", errorText);
-                        throw new Error("HTTP error! status: " + response.status + " - " + errorText);
-                    }
-
-                    const result = await response.json();
-
-
-                    // Direct response format (no main_block)
-                    if (result && result.success && result.data) {
-
-                        return result.data;
-                    }
-
-                    if (result && !result.success) {
-                        console.error(" API returned error:", result.error);
-                        throw new Error(result.error?.message || "API returned error");
-                    }
-
-                    // Fallback: get all services and filter client-side
-
-                    return await fetchAllServicesAndFilter(eventData);
-
-                } catch (error) {
-                    console.error(" Error fetching services:", error);
-
-                    return await fetchAllServicesAndFilter(eventData);
-                }
+                if (!eventData.eventid) throw new Error("A problem event is required");
+                const services = await requestServices({eventid: eventData.eventid});
+                if (!Array.isArray(services)) throw new Error("Invalid services response");
+                return services;
             }
 
-            /**
-             * Fallback method to get all services and filter
-             */
-            async function fetchAllServicesAndFilter(eventData) {
-                try {
-                    const formData = new FormData();
-                    formData.append("output", "extend");
-                    formData.append("selectParents", "extend");
-                    formData.append("selectChildren", "extend");
-                    formData.append("selectTags", "extend");
-                    formData.append("selectProblemTags", "extend");
-
-                    const response = await fetch("zabbix.php?action=problemanalist.service.get", {
-                        method: "POST",
-                        body: formData
-                    });
-
-                    if (!response.ok) {
-                        throw new Error("HTTP error! status: " + response.status);
-                    }
-
-                    const result = await response.json();
-
-
-                    if (result && result.success && result.data) {
-                        return result.data;
-                    }
-
-                    return [];
-
-                } catch (error) {
-                    console.error("Error fetching all services:", error);
-                    return [];
-                }
-            }
-
-            /**
-             * Display single service card with clickable hierarchy tree
-             */
             function displayServicesTree(services) {
                 const treeContainer = document.querySelector("#services-tree-container");
-                if (!treeContainer) {
-                    console.error("Tree container not found!");
-                    return;
+                if (!treeContainer) return;
+                const impactedService = services[0];
+                const path = impactedService.hierarchy_path?.length
+                    ? impactedService.hierarchy_path : [impactedService];
+                let html = \'<div class="services-container"><div class="services-summary-header"><h4>Impacted Services (\'
+                    + services.length + \')</h4><p>Services matching this event’s tags</p></div>\'
+                    + createHierarchyPath(path) + createServiceCard(impactedService, true);
+                if (services.length > 1) {
+                    html += \'<div><h5>Other Impacted Services</h5>\'
+                        + services.slice(1).map(service => createServiceCard(service, true)).join("") + \'</div>\';
                 }
-
-                const serviceMap = new Map();
-
-                // Create service map
-                services.forEach(service => {
-                    serviceMap.set(service.serviceid, {
-                        ...service,
-                        hierarchyChildren: []
-                    });
-                });
-
-                // Find the impacted service (the one that matched the event)
-                let impactedService = null;
-                services.forEach(service => {
-                    if (service.problem_tags && service.problem_tags.length > 0) {
-                        impactedService = service;
-                    }
-                });
-
-                if (!impactedService) {
-                    impactedService = services[0]; // Fallback to first service
-                }
-
-                // Use the hierarchy_path from backend in natural order (root -> leaf)
-                let pathToRoot = [];
-                if (impactedService.hierarchy_path && impactedService.hierarchy_path.length > 0) {
-                    // Keep as-is to preserve correct parent → child order
-                    pathToRoot = [...impactedService.hierarchy_path];
-                    // Ensure impacted service is the last item in the path
-                    const lastInPath = pathToRoot[pathToRoot.length - 1];
-                    if (!lastInPath || String(lastInPath.serviceid) !== String(impactedService.serviceid)) {
-                        pathToRoot.push({ serviceid: impactedService.serviceid, name: impactedService.name });
-                    }
-                } else {
-                    // Fallback: create path manually if not available
-                    pathToRoot = [impactedService];
-                }
-
-                // Generate HTML for the service tree
-                let finalHtml = "<div class=\"services-container\">";
-
-                // Summary header
-                finalHtml += "<div class=\"services-summary-header\"><h4> Impacted Services ({COUNT})</h4><p>Services matching this event\'s tags</p></div>".replace("{COUNT}", services.length);
-
-                // Main service card (impacted service)
-                const impactedServiceHtml = createServiceCard(impactedService, true);
-                finalHtml += "<div><div>" + createHierarchyPath(pathToRoot) + "</div>" + impactedServiceHtml + "</div>";
-
-                // Other services (if any)
-                const otherServices = services.filter(s => s.serviceid !== impactedService.serviceid);
-                if (otherServices.length > 0) {
-                    finalHtml += "<div style=\\"margin-top: 20px; padding-top: 20px; border-top: 2px solid #ddd;\\"><h5 style=\\"color: #333; margin-bottom: 15px;\\">🔗 Other Related Services (" + otherServices.length + ")</h5><div>";
-
-                    otherServices.forEach(service => {
-                        finalHtml += createServiceCard(service, false);
-                    });
-
-                    finalHtml += "</div></div>";
-                }
-
-                finalHtml += "</div>";
-
-                treeContainer.innerHTML = finalHtml;
-
-                // Store services globally for later use
+                treeContainer.innerHTML = html + \'</div>\';
+                treeContainer.onclick = event => {
+                    const action = event.target.closest("[data-service-action]");
+                    if (action && treeContainer.contains(action)) selectService(action.dataset.serviceAction);
+                };
                 window.currentServices = services;
                 window.currentServiceId = impactedService.serviceid;
-
-                // Load initial SLI data for impacted service
-                loadServiceSLI(impactedService.serviceid);
             }
 
-            /**
-             * Create hierarchy path HTML
-             */
-            function createHierarchyPath(pathToRoot) {
-                if (!pathToRoot || pathToRoot.length === 0) return "";
-
-                let pathHtml = "<div class=\"services-hierarchy-path\"><span class=\"hierarchy-label\">Hierarchy:</span>";
-
-                pathToRoot.forEach((service, index) => {
-                    if (index > 0) {
-                        pathHtml += " <span class=\"hierarchy-arrow\">→</span> ";
-                    }
-                    pathHtml += "<span class=\\"hierarchy-service\\" onclick=\\"selectService(\'" + service.serviceid + "\')\\">" + service.name + "</span>";
-                });
-
-                pathHtml += "</div>";
-                return pathHtml;
+            function createHierarchyPath(path) {
+                return \'<div class="services-hierarchy-path"><span class="hierarchy-label">Hierarchy:</span>\'
+                    + path.map(service => \'<button type="button" class="btn-link hierarchy-service" data-service-action="\'
+                        + escapeServiceHtml(service.serviceid) + \'">\' + escapeServiceHtml(service.name) + \'</button>\')
+                        .join(\'<span class="hierarchy-arrow"> → </span>\') + \'</div>\';
             }
 
-            /**
-             * Create service card HTML
-             */
-            function createServiceCard(service, isImpacted) {
-                if (isImpacted === undefined) isImpacted = false;
-
-                const statusClass = getServiceStatusClass(service.status);
-                const statusText = getServiceStatusText(service.status);
-
-                // SLA info
-                const hasRealSla = service.has_sla && service.sli !== null;
-                let slaInfo = "";
-
-                if (hasRealSla) {
-                    // SLI já vem como porcentagem (0-100), não precisa multiplicar por 100
-                    const sliFormatted = parseFloat(service.sli).toFixed(2);
-                    slaInfo = "<div class=\\"service-sla-info\\"><div class=\\"sla-item\\"><span class=\\"sla-label\\">SLI:</span><span class=\\"sla-value sla-value-success\\">" + sliFormatted + "%</span></div><div class=\\"sla-item\\"><span class=\\"sla-label\\">Uptime:</span><span class=\\"sla-value\\">" + (service.uptime || "N/A") + "</span></div><div class=\\"sla-item\\"><span class=\\"sla-label\\">Downtime:</span><span class=\\"sla-value\\">" + (service.downtime || "N/A") + "</span></div><div class=\\"sla-item\\"><span class=\\"sla-label\\">Error Budget:</span><span class=\\"sla-value sla-value-error\\">" + (service.error_budget || "N/A") + "</span></div></div>";
-                } else {
-                    slaInfo = "<div class=\\"service-no-sla\\"> No SLA configured</div>";
+            function createServiceSlaInfo(service) {
+                if (!service.has_sla || service.sli === null || service.sli === undefined) {
+                    return \'<div class="service-no-sla">No SLA configured</div>\';
                 }
+                const sli = Number(service.sli);
+                const rows = [
+                    ["SLI", Number.isFinite(sli) && sli >= 0 ? sli.toFixed(2) + "%" : "N/A"],
+                    ["Uptime", service.uptime || "N/A"],
+                    ["Downtime", service.downtime || "N/A"],
+                    ["Error Budget", service.error_budget || "N/A"]
+                ];
+                return \'<div class="service-sla-info">\' + rows.map(row =>
+                    \'<div class="sla-item"><span class="sla-label">\' + row[0]
+                    + \':</span><span class="sla-value">\' + escapeServiceHtml(row[1]) + \'</span></div>\'
+                ).join("") + \'</div>\';
+            }
 
-                let impactedClass = isImpacted ? " service-card-impacted" : "";
-                let impactedBadge = isImpacted ? "<span class=\\"impacted-badge\\"> Impacted</span>" : "";
-
-                return "<div class=\"service-card" + impactedClass + "\" data-serviceid=\"" + service.serviceid + "\"><div class=\"service-header\"><div class=\"service-name\"><span class=\"service-name-link\" onclick=\"selectService(\'" + service.serviceid + "\')\">" + service.name + "</span>" + impactedBadge + "</div><div class=\"service-status " + statusClass + "\">" + statusText + "</div></div>" + slaInfo + "</div>";
+            function createServiceCard(service, isImpacted = false) {
+                const id = escapeServiceHtml(service.serviceid);
+                return \'<div class="service-card\' + (isImpacted ? \' service-card-impacted\' : \'\')
+                    + \'" data-serviceid="\' + id + \'"><div class="service-header"><div class="service-name">\'
+                    + \'<button type="button" class="btn-link service-name-link" data-service-action="\' + id + \'">\'
+                    + escapeServiceHtml(service.name) + \'</button>\'
+                    + (isImpacted ? \'<span class="impacted-badge">Impacted</span>\' : \'\')
+                    + \'</div><div class="service-status \' + getServiceStatusClass(service.status) + \'">\'
+                    + escapeServiceHtml(getServiceStatusText(service.status)) + \'</div></div>\'
+                    + createServiceSlaInfo(service) + \'</div>\';
             }
 
             function getServiceStatusClass(status) {
-                const statusClasses = {
-                    0: "status-ok",
-                    2: "status-average",
-                    3: "status-warning",
-                    4: "status-high",
-                    5: "status-disaster"
-                };
-                return statusClasses[status] || "status-unknown";
-            }
-
-            function getServiceStatusStyle(status) {
-                const statusStyles = {
-                    0: "background: #27ae60; color: white;",
-                    2: "background: #f39c12; color: white;",
-                    3: "background: #e67e22; color: white;",
-                    4: "background: #e74c3c; color: white;",
-                    5: "background: #8e44ad; color: white;"
-                };
-                return statusStyles[status] || "background: #95a5a6; color: white;";
+                const classes = {"-1": "status-ok", 0: "status-not-classified", 1: "status-information",
+                    2: "status-warning", 3: "status-average", 4: "status-high", 5: "status-disaster"};
+                return classes[status] || "status-unknown";
             }
 
             function getServiceStatusText(status) {
-                const statusTexts = {
-                    0: " OK",
-                    2: " Average",
-                    3: " Warning",
-                    4: " High",
-                    5: " Disaster"
-                };
-                return statusTexts[status] || " Unknown";
+                return serviceStatusLabels[status] || "Unknown";
             }
 
-            /**
-             * Load SLI data for a specific service
-             */
+            function findServiceCard(serviceid) {
+                const cards = document.querySelectorAll("#services-tree-container .service-card[data-serviceid]");
+                return Array.from(cards).find(card => card.dataset.serviceid === String(serviceid));
+            }
+
             async function loadServiceSLI(serviceid) {
                 try {
-                    const formData = new FormData();
-                    formData.append("serviceid", serviceid);
-
-                    const response = await fetch("zabbix.php?action=problemanalist.service.get", {
-                        method: "POST",
-                        body: formData
-                    });
-
-                    if (!response.ok) {
-                        throw new Error("HTTP error! status: " + response.status);
-                    }
-
-                    const result = await response.json();
-
-                    if (result && result.success && result.data) {
-                        // Update the service card with new SLI data
-                        updateServiceSLIDisplay(serviceid, result.data);
-                    }
-
+                    const service = await requestServices({serviceid});
+                    updateServiceSLIDisplay(serviceid, service);
                 } catch (error) {
-                    console.error(" Error loading SLI data:", error);
+                    console.error("Error loading SLI data:", error);
                 }
             }
 
-            function updateServiceSLIDisplay(serviceid, serviceData) {
-                // Encontrar o card do serviço
-                let serviceCard = document.querySelector("[data-serviceid=\"" + serviceid + "\"]");
-
-                // Fallback para o primeiro card caso não exista um card específico
-                if (!serviceCard) {
-                    const firstCard = document.querySelector(".service-card");
-                    if (firstCard) {
-                        serviceCard = firstCard;
-                    } else {
-                        return;
-                    }
-                }
-
-                // Atualizar status do serviço
-                const statusElement = serviceCard.querySelector(".service-status");
-
-                if (statusElement && serviceData.status !== undefined) {
-                    const statusClass = getServiceStatusClass(serviceData.status);
-                    const statusText = getServiceStatusText(serviceData.status);
-                    statusElement.className = "service-status " + statusClass;
-                    statusElement.textContent = statusText;
-                }
-
-                // Atualizar informações SLI - procurar container SLA
-                let slaContainer = serviceCard.querySelector(".service-sla-info");
-                if (!slaContainer) {
-                    slaContainer = serviceCard.querySelector(".service-no-sla");
-                }
-
-                if (slaContainer) {
-                    const hasRealSla = serviceData.has_sla && serviceData.sli !== null;
-
-                    if (hasRealSla) {
-                        // Service tem SLA configurado - mostrar valores
-                        const sliFormatted = parseFloat(serviceData.sli).toFixed(2);
-                        const uptimeValue = serviceData.uptime || "";
-                        const downtimeValue = serviceData.downtime || "";
-                        const errorBudgetValue = serviceData.error_budget || "";
-
-
-                        slaContainer.className = "service-sla-info";
-                        slaContainer.innerHTML =
-                            "<div class=\\"sla-item\\"><span class=\\"sla-label\\">SLI:</span><span class=\\"sla-value sla-value-success\\">" +
-                            sliFormatted + "%</span></div>" +
-                            "<div class=\\"sla-item\\"><span class=\\"sla-label\\">Uptime:</span><span class=\\"sla-value\\">" +
-                            uptimeValue + "</span></div>" +
-                            "<div class=\\"sla-item\\"><span class=\\"sla-label\\">Downtime:</span><span class=\\"sla-value\\">" +
-                            downtimeValue + "</span></div>" +
-                            "<div class=\\"sla-item\\"><span class=\\"sla-label\\">Error Budget:</span><span class=\\"sla-value sla-value-error\\">" +
-                            errorBudgetValue + "</span></div>";
-                    } else {
-                        // Service não tem SLA configurado: mostrar campos em branco
-                        slaContainer.className = "service-sla-info";
-                        slaContainer.innerHTML =
-                            "<div class=\\"sla-item\\"><span class=\\"sla-label\\">SLI:</span><span class=\\"sla-value\\"></span></div>" +
-                            "<div class=\\"sla-item\\"><span class=\\"sla-label\\">Uptime:</span><span class=\\"sla-value\\"></span></div>" +
-                            "<div class=\\"sla-item\\"><span class=\\"sla-label\\">Downtime:</span><span class=\\"sla-value\\"></span></div>" +
-                            "<div class=\\"sla-item\\"><span class=\\"sla-label\\">Error Budget:</span><span class=\\"sla-value\\"></span></div>";
-                    }
-                } else {
-                    const allDivs = serviceCard.querySelectorAll("div");
-                    allDivs.forEach((div, index) => {
-                    });
-                }
-
+            function updateServiceSLIDisplay(serviceid, service) {
+                const card = findServiceCard(serviceid);
+                if (!card) return;
+                const status = card.querySelector(".service-status");
+                status.className = "service-status " + getServiceStatusClass(service.status);
+                status.textContent = getServiceStatusText(service.status);
+                const sla = card.querySelector(".service-sla-info, .service-no-sla");
+                if (sla) sla.outerHTML = createServiceSlaInfo(service);
             }
 
-            /**
-             * Select and focus on a specific service
-             */
             function selectService(serviceid) {
-
-                // Remove previous selections
-                document.querySelectorAll("[data-serviceid]").forEach(card => {
-                    card.style.borderColor = "#ddd";
+                const tree = document.querySelector("#services-tree-container");
+                if (!tree) return;
+                tree.querySelectorAll(".service-card").forEach(card => {
+                    card.style.borderColor = "";
+                    card.style.boxShadow = "";
                 });
-
-                // Highlight selected service
-                const selectedCard = document.querySelector("[data-serviceid=\"" + serviceid + "\"]");
+                let selectedCard = findServiceCard(serviceid);
+                if (!selectedCard) {
+                    const parent = (window.currentServices || []).flatMap(service => service.hierarchy_path || [])
+                        .find(service => String(service.serviceid) === String(serviceid));
+                    if (parent) {
+                        tree.insertAdjacentHTML("beforeend", createServiceCard(parent));
+                        selectedCard = findServiceCard(serviceid);
+                    }
+                }
                 if (selectedCard) {
                     selectedCard.style.borderColor = "#007cba";
                     selectedCard.style.boxShadow = "0 0 10px rgba(0,124,186,0.3)";
-                    selectedCard.scrollIntoView({ behavior: "smooth", block: "nearest" });
+                    selectedCard.scrollIntoView({behavior: "smooth", block: "nearest"});
+                    loadServiceSLI(serviceid);
                 }
-
-                // Load fresh SLI data
-                loadServiceSLI(serviceid);
-
-                // Store globally
                 window.currentServiceId = serviceid;
             }
 
-            /**
-             * Display message when no services are found
-             */
             function displayNoServicesMessage() {
-                const treeContainer = document.querySelector("#services-tree-container");
-                if (!treeContainer) return;
-
-                treeContainer.innerHTML = "<div class=\"services-no-results\"><p><strong>No impacted services found for this event.</strong></p><p>This happens when:</p><ul><li>Event tags don\'t match any service problem_tags</li><li>Services are not configured with proper problem_tags</li><li>The service might not be related to this type of problem</li></ul><p><small><strong>How it works:</strong> The system matches event tags with service problem_tags to find impacted services.</small></p></div>";
+                const tree = document.querySelector("#services-tree-container");
+                if (!tree) return;
+                tree.innerHTML = \'<div class="services-no-results"><p><strong>No impacted services found for this event.</strong></p>\'
+                    + \'<p>No accessible service has problem-tag rules matching all required event tags.</p></div>\';
             }
 
-            /**
-             * Display error message
-             */
-            function displayServicesError(errorMessage) {
-                const treeContainer = document.querySelector("#services-tree-container");
-                if (!treeContainer) return;
-
-                treeContainer.innerHTML = "<div style=\\"background: #fef5f5; border: 1px solid #e74c3c; border-radius: 8px; padding: 20px; text-align: center; color: #e74c3c;\\"><p>Error loading services: " + errorMessage + "</p></div>";
+            function displayServicesError(message) {
+                const tree = document.querySelector("#services-tree-container");
+                if (!tree) return;
+                tree.innerHTML = \'<div class="services-no-results"><p>Error loading services: \'
+                    + escapeServiceHtml(message) + \'</p></div>\';
             }
 
-            // Make functions globally available
             window.loadImpactedServices = loadImpactedServices;
             window.loadServiceSLI = loadServiceSLI;
             window.selectService = selectService;

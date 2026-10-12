@@ -16,8 +16,8 @@ This module provides a historical analysis of specific problems in Zabbix, offer
 
 ## **Popup Tabs**
 - **Host Info**: Host description plus monitoring/availability stats, host groups, monitored-by info, tags, templates, and inventory (when available).
-- **Overview**: Event summary table (ID, name, host, severity, time, status, trigger details), optional agent metrics, and monthly incident comparison (last 6 months when available).
-- **Timeline**: Zabbix event list for the previous 20 occurrences with native actions (acknowledge, severity change, close, etc.).
+- **Overview**: Event summary table (ID, name, host, severity, time, status, trigger details) and optional agent metrics.
+- **Timeline**: Monthly incident comparison (last 6 months when available) and Zabbix event list for the previous 20 occurrences with native actions (acknowledge, severity change, close, etc.).
 - **Time Patterns**: Extended section with interactive filter bar, incident heatmap (day x hour), and monthly drilldown (last 12 months). Hourly and weekly charts are shown below this section as collapsible panels (collapsed by default).
 - **Graphs**: Consolidated charts for fixed windows (1 hour before incident to incident, and incident to now).
 - **Update**: Full action history including acknowledgements, comments, suppress/unsuppress, severity changes, and recovery/manual-close entries.
@@ -27,9 +27,11 @@ This module provides a historical analysis of specific problems in Zabbix, offer
 - **Problem analysis popup**: Adds a dedicated event details popup with tabs for host context, timelines, patterns, graphs, updates, and impacted services.
 - **Historical comparison**: Builds monthly incident comparisons for the same problem (last 6 months when available).
 - **Pattern detection**: Aggregates related events to show hourly/weekday distributions, interactive heatmap filtering, and monthly/day drilldowns.
-- **Time format behavior**: Time labels in patterns follow module behavior with 24h formatting where configured/expected.
+- **Time format behavior**: All pattern charts and filters use the Zabbix frontend/user timezone. The 12-month window includes the event month and the preceding 11 calendar months; last-week comparisons use the calendar week preceding the selected event's week.
 - **Graph aggregation**: Pulls item data to show a compact set of charts around the incident window.
-- **Service impact matching**: Uses event tags to find related services with matching `problem_tags`.
+- **Service impact matching**: Every service `problem_tags` rule must match an event tag, using Zabbix's case-sensitive equals/contains operators. Events without tags return no impacted services; inaccessible events and failed requests display an error.
+
+Regression check instructions are in [tests/README.md](tests/README.md).
 
 ## **Example Report**
 The image shows an analysis for the problem **"Event Details: AIX: Zabbix agent is not available (for 3m)"**, comparing last 6 months

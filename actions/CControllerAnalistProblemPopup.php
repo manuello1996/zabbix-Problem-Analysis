@@ -57,7 +57,6 @@ class CControllerAnalistProblemPopup extends CController {
 
     protected function doAction(): void {
         $eventid = $this->getInput('eventid');
-        $triggerid = $this->getInput('triggerid', 0);
         $hostid = $this->getInput('hostid', 0);
 
 
@@ -69,26 +68,20 @@ class CControllerAnalistProblemPopup extends CController {
             ],
             'eventids' => $eventid,
             'selectTags' => ['tag', 'value'],
-            'selectAcknowledges' => ['acknowledgeid', 'clock', 'action']
+            'selectAcknowledges' => ['acknowledgeid', 'clock', 'userid', 'message', 'action',
+                'old_severity', 'new_severity', 'suppress_until'
+            ]
         ]);
 
         $event = $events ? $events[0] : [];
 
-        // If no event found, create a minimal event object to prevent errors
-        if (!$event) {
-            $event = [
-                'eventid' => $eventid,
-                'name' => _('Event not found'),
-                'severity' => 0,
-                'clock' => time(),
-                'acknowledged' => 0,
-                'source' => 0,
-                'object' => 0,
-                'objectid' => 0,
-                'r_eventid' => 0,
-                'opdata' => '',
-                'value' => 1
-            ];
+        if (!$event || (int) $event['source'] !== EVENT_SOURCE_TRIGGERS
+                || (int) $event['object'] !== EVENT_OBJECT_TRIGGER
+                || (int) $event['value'] !== TRIGGER_VALUE_TRUE) {
+            $this->setResponse((new CControllerResponseData(['main_block' => json_encode([
+                'error' => ['messages' => [_('Problem event not found or access denied.')]]
+            ])]))->disableView());
+            return;
         }
 
         if (!empty($event['acknowledges'])) {
@@ -119,14 +112,9 @@ class CControllerAnalistProblemPopup extends CController {
             }
         }
 
-        // Get trigger details - primeiro tenta com triggerid passado, senão extrai do evento
+        // The event determines the trigger; request hints must not override it.
         $trigger = null;
-        $actual_triggerid = $triggerid;
-
-        // Se não temos triggerid, tenta extrair do evento
-        if (!$actual_triggerid && $event && isset($event['objectid'])) {
-            $actual_triggerid = $event['objectid'];
-        }
+        $actual_triggerid = $event['objectid'];
 
         if ($actual_triggerid > 0) {
             $triggers = API::Trigger()->get([
@@ -139,39 +127,27 @@ class CControllerAnalistProblemPopup extends CController {
                 'expandExpression' => true
             ]);
             $trigger = $triggers ? $triggers[0] : null;
-
-
-
-
-            if ($trigger) {
-
-
-
-                if (isset($trigger['items'])) {
-
-                } else {
-
-                }
-            } else {
-
-            }
         }
 
         // Get host details with comprehensive data for hostcard
         $host = null;
-        $actual_hostid = $hostid;
+        $actual_hostid = 0;
 
-        // Se não temos hostid, tenta extrair do trigger
-        if (!$actual_hostid && $trigger && isset($trigger['hosts']) && !empty($trigger['hosts'])) {
+        // Only select a host belonging to the event's trigger.
+        if ($trigger && !empty($trigger['hosts'])) {
             $actual_hostid = $trigger['hosts'][0]['hostid'];
+            // Preserve the selected host only when it belongs to this event's trigger.
+            foreach ($trigger['hosts'] as $trigger_host) {
+                if ((string) $trigger_host['hostid'] === (string) $hostid) {
+                    $actual_hostid = $trigger_host['hostid'];
+                    break;
+                }
+            }
 
         }
 
         if ($actual_hostid > 0) {
             $host = $this->getHostCardData($actual_hostid);
-
-        } else {
-
         }
 
         // Get problem events for Time Patterns.
@@ -179,7 +155,7 @@ class CControllerAnalistProblemPopup extends CController {
         if ($actual_triggerid > 0) {
             // Get problem events from the last 12 months for Time Patterns/Heatmap.
             $pattern_time_till = isset($event['clock']) ? (int)$event['clock'] : time();
-            $pattern_time_from = strtotime('-12 months', $pattern_time_till);
+            $pattern_time_from = strtotime('-11 months', strtotime(date('Y-m-01 00:00:00', $pattern_time_till)));
 
             $pattern_events = API::Event()->get([
                 'output'    => ['clock'],

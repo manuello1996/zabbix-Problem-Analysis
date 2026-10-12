@@ -3,6 +3,7 @@
 namespace Modules\AnalistProblem\Actions;
 
 use CController;
+use CControllerResponseData;
 use API;
 use Exception;
 
@@ -25,7 +26,7 @@ class CControllerAnalistServicePopup extends CController {
 	 * Check user permissions
 	 */
 	protected function checkPermissions(): bool {
-		return $this->getUserType() >= USER_TYPE_ZABBIX_USER;
+		return $this->checkAccess('ui.monitoring.problems');
 	}
 
 	/**
@@ -34,10 +35,10 @@ class CControllerAnalistServicePopup extends CController {
 	protected function checkInput(): bool {
 		$fields = [
 			'hostname' => 'string',
-			'hostid' => 'string', 
-			'eventid' => 'string',
-			'triggerid' => 'string',
-			'serviceid' => 'string',
+			'hostid' => 'id',
+			'eventid' => 'id',
+			'triggerid' => 'id',
+			'serviceid' => 'id',
 			'output' => 'string',
 			'selectParents' => 'string',
 			'selectChildren' => 'string',
@@ -47,6 +48,12 @@ class CControllerAnalistServicePopup extends CController {
 
 		$ret = $this->validateInput($fields);
 
+		if (!$ret) {
+			$this->setResponse((new CControllerResponseData(['main_block' => json_encode([
+				'success' => false,
+				'error' => ['message' => implode(' ', array_column(get_and_clear_messages(), 'message'))]
+			])]))->disableView());
+		}
 		return $ret;
 	}
 
@@ -93,9 +100,7 @@ class CControllerAnalistServicePopup extends CController {
 			];
 		}
 
-		// Direct JSON output
-		echo json_encode($response);
-		exit;
+		$this->setResponse((new CControllerResponseData(['main_block' => json_encode($response)]))->disableView());
 	}
 
 	/**
@@ -115,26 +120,26 @@ class CControllerAnalistServicePopup extends CController {
 				'sortorder' => 'ASC'
 			];
 			
-			// Se há tags do evento, usar como problem_tags
-			if (!empty($event_tags)) {
-				$problem_tags = [];
-				foreach ($event_tags as $tag) {
-					if (isset($tag['tag'])) {
-						$problem_tag = ['tag' => $tag['tag']];
-						// Incluir value mesmo se vazio (como no exemplo)
-						$problem_tag['value'] = $tag['value'] ?? '';
-						$problem_tags[] = $problem_tag;
-					}
-				}
-				
-				if (!empty($problem_tags)) {
-					$service_params['problem_tags'] = $problem_tags;
-				}
+			if (empty($params['eventid'])) {
+				throw new Exception(_('A problem event is required.'));
 			}
-			
-			// Buscar serviços com filtros aplicados
+			if (!$event_tags) {
+				return ['success' => true, 'data' => []];
+			}
+
+			// Filter candidates by tag name, then evaluate every service rule against the event.
+			$service_params['problem_tags'] = [];
+			foreach (array_unique(array_column($event_tags, 'tag')) as $tag) {
+				$service_params['problem_tags'][] = ['tag' => $tag, 'operator' => TAG_OPERATOR_EXISTS];
+			}
 			$services = API::Service()->get($service_params);
-			
+			if ($services === false) {
+				throw new Exception(_('Unable to load services.'));
+			}
+			$services = array_filter($services, function (array $service) use ($event_tags): bool {
+				return $this->matchesEventTags($service['problem_tags'] ?? [], $event_tags);
+			});
+
 			// Enriquecer dados dos serviços com informações SLA e caminho completo
 			$enriched_services = [];
 			foreach ($services as $service) {
@@ -408,23 +413,45 @@ class CControllerAnalistServicePopup extends CController {
 	 * Get event tags for the specified event ID
 	 */
 	private function getEventTags(string $eventid): array {
-		try {
-			$events = API::Event()->get([
-				'output' => ['eventid'],
-				'selectTags' => 'extend',
-				'eventids' => [$eventid],
-				'limit' => 1
-			]);
-
-			if (!empty($events) && !empty($events[0]['tags'])) {
-				return $events[0]['tags'];
-			}
-
-			return [];
-
-		} catch (Exception $e) {
-			return [];
+		$events = API::Event()->get([
+			'output' => ['eventid', 'source', 'object', 'value'],
+			'selectTags' => ['tag', 'value'],
+			'eventids' => [$eventid]
+		]);
+		if (!$events || (int) $events[0]['source'] !== EVENT_SOURCE_TRIGGERS
+				|| (int) $events[0]['object'] !== EVENT_OBJECT_TRIGGER
+				|| (int) $events[0]['value'] !== TRIGGER_VALUE_TRUE) {
+			throw new Exception(_('Problem event not found or access denied.'));
 		}
+		return $events[0]['tags'] ?? [];
+	}
+
+	/** All problem-tag rules must match, as in the Zabbix service manager. */
+	private function matchesEventTags(array $rules, array $event_tags): bool {
+		if (!$rules) {
+			return false;
+		}
+		foreach ($rules as $rule) {
+			$matched = false;
+			foreach ($event_tags as $tag) {
+				if ($tag['tag'] !== $rule['tag']) {
+					continue;
+				}
+				$value = (string) ($tag['value'] ?? '');
+				$rule_value = (string) ($rule['value'] ?? '');
+				$operator = (int) $rule['operator'];
+				if (($operator === ZBX_SERVICE_PROBLEM_TAG_OPERATOR_EQUAL && $value === $rule_value)
+						|| ($operator === ZBX_SERVICE_PROBLEM_TAG_OPERATOR_LIKE
+							&& strpos($value, $rule_value) !== false)) {
+					$matched = true;
+					break;
+				}
+			}
+			if (!$matched) {
+				return false;
+			}
+		}
+		return true;
 	}
 
 	/**

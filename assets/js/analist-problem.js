@@ -105,95 +105,52 @@ document.addEventListener('DOMContentLoaded', () => {
         }
 
         addLTSButtonToMainTable() {
-            const flickerfreescreen = document.querySelector('.flickerfreescreen');
-            if (!flickerfreescreen) return;
-
-            const tables = flickerfreescreen.querySelectorAll('table.list-table');
-            tables.forEach(table => {
-                const tbody = table.querySelector('tbody');
-                if (!tbody) return;
-
-                // Verificar se já adicionamos o cabeçalho da coluna LTS
-                const headerRow = table.querySelector('thead tr');
-                if (headerRow && !headerRow.querySelector('.lts-header')) {
-                    const ltsHeader = document.createElement('th');
-                    ltsHeader.className = 'lts-header';
-                    ltsHeader.textContent = 'Details';
-                    headerRow.appendChild(ltsHeader);
-                }
-
-                const rows = tbody.querySelectorAll('tr:not(.timeline-axis):not(.timeline-td)');
-                rows.forEach(row => {
-                    // Verifica se a linha não é uma linha de tempo e se já tem botão LTS
-                    if (row.querySelector('.js-lts-button') ||
-                        !row.querySelector('.problem-expand-td')) return;
-
-                    // Extrai dados usando data-menu-popup (mais confiável)
-                    const problemData = this.extractProblemDataFromMenuPopup(row);
-
-                    if (problemData && problemData.eventid) {
-                        this.addLTSColumnToRow(row, problemData);
-                    }
-                });
-            });
+            const screen = document.querySelector('.flickerfreescreen');
+            if (!screen) return;
+            screen.querySelectorAll('table.list-table').forEach(table => this.decorateProblemTable(table));
         }
 
         addLTSButtonToDashboardWidgets() {
-            // Buscar widgets de problemas na dashboard
-            const selectors = [
-                '.dashboard-grid-widget-contents .dashboard-widget-problems',
-                '.dashboard-widget-problems',
-                '.dashboard-grid-widget-contents table.list-table',
-                '[class*="dashboard"][class*="widget"][class*="problem"] table.list-table',
-                '.dashboard-grid-widget table.list-table'
-            ];
+            document.querySelectorAll('.dashboard-widget-problems table.list-table')
+                .forEach(table => this.decorateProblemTable(table, true));
+        }
 
-            const problemWidgets = new Set();
-
-            selectors.forEach(selector => {
-                document.querySelectorAll(selector).forEach(element => {
-                    if (element.tagName === 'TABLE') {
-                        const widget = element.closest('.dashboard-grid-widget-contents, .dashboard-widget-problems') || element.parentElement;
-                        if (widget) problemWidgets.add(widget);
-                    } else {
-                        problemWidgets.add(element);
-                    }
-                });
-            });
-
-            problemWidgets.forEach(widget => {
-                const problemTable = widget.querySelector('table.list-table') || (widget.tagName === 'TABLE' ? widget : null);
-                if (!problemTable) return;
-
-                const tbody = problemTable.querySelector('tbody');
-                if (!tbody) return;
-
-                // Verificar se já adicionamos o cabeçalho da coluna LTS
-                const headerRow = problemTable.querySelector('thead tr');
-                if (headerRow && !headerRow.querySelector('.lts-header')) {
-                    const ltsHeader = document.createElement('th');
-                    ltsHeader.className = 'lts-header';
-                    ltsHeader.textContent = 'Details';
-                    headerRow.appendChild(ltsHeader);
+        decorateProblemTable(table, isWidget = false) {
+            const tbody = table.querySelector('tbody');
+            const header = table.querySelector('thead tr');
+            if (!tbody || !header) return;
+            const rows = Array.from(tbody.rows);
+            const problems = rows.map(row => ({row, data: this.extractProblemDataFromMenuPopup(row)}))
+                .filter(({row, data}) => data && data.eventid
+                    && (isWidget || row.querySelector('[data-menu-popup*="triggerid"]')));
+            // Verify that the table contains problems before adding a column.
+            if (!problems.length && !header.querySelector('.lts-header')) return;
+            if (!header.querySelector('.lts-header')) {
+                const cell = document.createElement('th');
+                cell.className = 'lts-header';
+                cell.textContent = 'Details';
+                header.appendChild(cell);
+            }
+            problems.forEach(({row, data}) => this.addLTSColumnToRow(row, data, isWidget));
+            const columnCount = Array.from(header.cells).reduce((sum, cell) => sum + cell.colSpan, 0);
+            rows.forEach(row => {
+                if (row.querySelector('.lts-column-cell') || !row.cells.length) return;
+                const count = Array.from(row.cells).reduce((sum, cell) => sum + cell.colSpan, 0);
+                if (count !== columnCount - 1) return;
+                // Timeline separators and empty-state rows usually end in a spanning cell.
+                const last = row.cells[row.cells.length - 1];
+                if (last.colSpan > 1 || row.cells.length === 1) {
+                    last.colSpan++;
+                } else {
+                    const spacer = document.createElement('td');
+                    spacer.className = 'lts-column-cell';
+                    row.appendChild(spacer);
                 }
-
-                const rows = tbody.querySelectorAll('tr:not(.timeline-axis):not(.timeline-td)');
-                rows.forEach(row => {
-                    // Verifica se já existe um botão LTS nesta linha
-                    if (row.querySelector('.js-lts-button-widget')) return;
-
-                    // Extrai dados usando data-menu-popup
-                    const problemData = this.extractProblemDataFromMenuPopup(row);
-
-                    if (problemData && problemData.eventid) {
-                        this.addLTSColumnToRow(row, problemData, true);
-                    }
-                });
             });
         }
 
         extractProblemDataFromMenuPopup(row) {
-            let eventid = null;
+            let eventid = row.getAttribute('data-eventid');
             let triggerid = null;
             let hostid = null;
             let hostname = '';
@@ -231,6 +188,7 @@ document.addEventListener('DOMContentLoaded', () => {
                         if (triggerData.data && triggerData.data.triggerid) {
                             triggerid = triggerData.data.triggerid;
                             problemName = triggerElement.textContent.trim();
+                            eventid = eventid || triggerData.data.eventid;
                         }
                     } catch (e) {
                         console.warn('Erro ao parsear triggerid:', e);
@@ -412,6 +370,9 @@ document.addEventListener('DOMContentLoaded', () => {
 
             // Cria o botão
             const button = document.createElement('button');
+            button.type = 'button';
+            const spacer = row.querySelector('.lts-column-cell');
+            if (spacer) spacer.remove();
             button.className = isWidget ? 'btn-alt js-lts-button-widget' : 'btn-alt js-lts-button';
             button.innerHTML = 'Details';
             button.title = `Detail for: ${problemData.hostname} - ${problemData.problemName}`;
@@ -478,7 +439,7 @@ document.addEventListener('DOMContentLoaded', () => {
                 });
             } else {
                 // Fallback para abrir em nova janela
-                window.open(url, 'analist-lts', 'width=1200,height=800,scrollbars=yes,resizable=yes');
+                window.open('zabbix.php?action=problemanalist.view&' + url, 'analist-lts', 'width=1200,height=800,scrollbars=yes,resizable=yes');
             }
         }
 
