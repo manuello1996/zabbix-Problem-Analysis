@@ -56,10 +56,15 @@ $event = ['eventid' => '1', 'name' => "Quoted \"event\" \n </script>", 'severity
 $host = ['name' => "Quoted \"host\" \n </script>", 'hostid' => '1'];
 $scenario = $argv[2] ?? 'readonly';
 if ($scenario === 'acknowledged') $event['acknowledged'] = 1;
+if ($scenario === 'recovered') {
+    $event['r_eventid'] = '2';
+    $event['recovery_clock'] = $event['clock'] + 120;
+}
 $response = (new ViewFixture())->render([
     'tab' => $argv[1] ?? 'overview', 'event' => $event,
     'host' => ($argv[1] ?? 'overview') === 'host' ? null : $host, 'trigger' => null,
     'is_fragment' => $scenario === 'fragment',
+    'closing_pending' => $scenario === 'closing',
     'can_acknowledge' => in_array($scenario, ['permitted', 'acknowledged', 'ack-only']),
     'can_close' => in_array($scenario, ['permitted', 'acknowledged']),
     'pattern_events' => [['clock' => strtotime('2026-03-30 00:30:00')]],

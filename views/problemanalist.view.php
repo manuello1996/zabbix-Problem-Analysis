@@ -41,6 +41,7 @@ $event_time_value = $event_details_url !== null
     : ($event_time ?: 'N/A');
 $time_ago = isset($event['clock']) ? zbx_date2age($event['clock']) : '';
 $is_resolved = !empty($event['r_eventid']);
+$closing_pending = !$is_resolved && !empty($data['closing_pending']);
 $recovery_time = isset($event['recovery_clock'])
     ? zbx_date2str(DATE_TIME_FORMAT_SECONDS, (int) $event['recovery_clock'])
     : '';
@@ -55,6 +56,15 @@ $problem_actions = [
     'canAcknowledge' => (bool) ($data['can_acknowledge'] ?? false),
     'canClose' => (bool) ($data['can_close'] ?? false),
     'acknowledged' => $is_acknowledged,
+    'recoveryReady' => $is_resolved && isset($event['recovery_clock']),
+    'closingPending' => $closing_pending,
+    'pendingRecoveryRow' => (new CRow([
+        (new CCol(_('Recovery time')))->addClass('analist-detail-label'),
+        (new CCol(_('Pending')))->addClass('analist-detail-value'),
+        (new CCol(_('Duration')))->addClass('analist-detail-label'),
+        (new CCol(_('Pending')))->addClass('analist-detail-value')
+    ]))->setAttribute('data-recovery-row', '')->toString(),
+    'closingLabel' => _('Closing problem. Waiting for recovery time…'),
     'csrfTokenName' => CSRF_TOKEN_NAME,
     'csrfToken' => !empty($data['can_acknowledge']) || !empty($data['can_close'])
         ? CCsrfTokenHelper::get('acknowledge') : '',
@@ -375,19 +385,19 @@ if ($problem_actions['canClose']) {
     ]);
 }
 
-if ($is_resolved) {
-    $problem_details_table->addRow([
+if ($is_resolved || $closing_pending) {
+    $problem_details_table->addRow((new CRow([
         $details_label(_('Recovery time')),
-        $details_value($recovery_time ?: _('Unknown')),
+        $details_value($recovery_time ?: ($closing_pending ? _('Pending') : _('Unknown'))),
         $details_label(_('Duration')),
-        $details_value($problem_duration ?: _('Unknown'))
-    ]);
+        $details_value($closing_pending ? _('Pending') : ($problem_duration ?: _('Unknown')))
+    ]))->setAttribute('data-recovery-row', ''));
 }
 else {
-    $problem_details_table->addRow([
+    $problem_details_table->addRow((new CRow([
         $details_label(_('Age')),
         $details_value($time_ago ?: 'N/A')
-    ]);
+    ]))->setAttribute('data-age-row', ''));
 }
 
 $event_tags = makeTags([$event], true, 'eventid', count($event['tags'] ?? []));
@@ -991,6 +1001,13 @@ foreach ($tab_labels as $key => $label) {
 $popup_config = [
     'rootId' => $popup_id,
     'problemActions' => $problem_actions,
+    'slaLabels' => [
+        'none' => _('No accessible SLA configured'), 'unknown' => _('SLA information unavailable'),
+        'unavailable' => _('SLI unavailable'), 'disabled' => _('SLI unavailable (SLA disabled)'),
+        'sla' => _('SLA'), 'target' => _('Target'), 'sli' => _('SLI'),
+        'uptime' => _('Uptime'), 'downtime' => _('Downtime'), 'budget' => _('Error budget'),
+        'period' => _('Reporting period (UTC)')
+    ],
     'eventData' => [
         'eventid' => $event['eventid'],
         'hostname' => $host['name'] ?? $host['host'] ?? '',

@@ -43,6 +43,9 @@ class ApiFixture {
         switch ($this->kind) {
             case 'event':
                 if (!isset($options['eventids'])) return API::$history;
+                if (in_array('2', array_map('strval', (array) $options['eventids']), true)) {
+                    return [['eventid' => '2', 'clock' => 220]];
+                }
                 $event = API::$event;
                 if (!$event) return [];
                 if (isset($options['selectAcknowledges'])) {
@@ -54,6 +57,9 @@ class ApiFixture {
                 return [$event];
             case 'trigger': return API::$trigger && (empty($options['editable']) || API::$editable) ? [API::$trigger] : [];
             case 'host': throw new HostSelectionProbe((string) $options['hostids']);
+            case 'sla':
+                if (API::$slas instanceof Exception) throw API::$slas;
+                return API::$slas;
             case 'service':
                 if (API::$services === false) return false;
                 if (isset($options['serviceids'])) {
@@ -65,6 +71,12 @@ class ApiFixture {
         }
         return [];
     }
+    public function getSli(array $options) {
+        API::$calls[] = ['sli', $options];
+        $result = API::$sli[$options['slaid']] ?? [];
+        if ($result instanceof Exception) throw $result;
+        return $result;
+    }
 }
 class API {
     public static $event = [];
@@ -73,10 +85,13 @@ class API {
     public static $services = [];
     public static $calls = [];
     public static $history = [];
+    public static $slas = [];
+    public static $sli = [];
     public static function Event() { return new ApiFixture('event'); }
     public static function Trigger() { return new ApiFixture('trigger'); }
     public static function Host() { return new ApiFixture('host'); }
     public static function Service() { return new ApiFixture('service'); }
+    public static function Sla() { return new ApiFixture('sla'); }
 }
 require dirname(__DIR__).'/actions/CControllerAnalistProblemPopup.php';
 require dirname(__DIR__).'/actions/CControllerAnalistServicePopup.php';
@@ -122,6 +137,59 @@ API::$services = [
 ];
 $result = $list->invoke($service_controller, ['eventid' => '1'], $tags);
 check($result['success'] && array_column($result['data'], 'serviceid') === ['101'], 'Only matching services may be enriched and returned');
+
+$sla_method = new ReflectionMethod($service_controller, 'getSlaData');
+$read_sla = static function () use ($sla_method) {
+    return $sla_method->invoke(new ServiceControllerFixture(), '101');
+};
+check($read_sla()['sla_state'] === 'none', 'Empty successful lookup establishes no accessible SLA');
+$sla_base = ['period' => ZBX_SLA_PERIOD_MONTHLY, 'timezone' => 'Europe/Zurich',
+    'status' => ZBX_SLA_STATUS_ENABLED, 'effective_date' => 100];
+API::$slas = [
+    $sla_base + ['slaid' => '5', 'name' => 'Production SLA', 'slo' => '97.25'],
+    $sla_base + ['slaid' => '6', 'name' => 'Critical SLA', 'slo' => '99.95']
+];
+$cell = ['sli' => '93.75', 'uptime' => 3600, 'downtime' => 240, 'error_budget' => -120];
+API::$sli = ['5' => ['periods' => [['period_from' => 100, 'period_to' => 200], ['period_from' => 200, 'period_to' => 300]],
+    'serviceids' => ['999', '101'], 'sli' => [[['sli' => 10], ['sli' => 20]], [['sli' => 30], $cell]]],
+    '6' => new Exception('SLI denied')];
+API::$calls = [];
+$result = $read_sla();
+check($result['has_sla'] && count($result['slas']) === 2, 'All associated SLA definitions must be retained');
+check($result['slas'][0]['sli'] === 93.75, 'SLI is indexed by reporting period then service, matching IDs as strings');
+check($result['sla_info'] === ['name' => 'Production SLA', 'target' => '97.25%'], 'Summary uses configured name and target');
+check($result['slas'][0]['error_budget'] === '-2m', 'Negative error budgets must stay negative');
+check($result['slas'][0]['reporting_period']['period_from'] === 200, 'Use the latest returned reporting period');
+check($result['slas'][1]['sli_state'] === 'unavailable' && $result['slas'][1]['name'] === 'Critical SLA',
+    'SLI failure must preserve SLA configuration and not claim no SLA');
+$sli_calls = array_values(array_filter(API::$calls, static function ($call) { return $call[0] === 'sli'; }));
+check($sli_calls[0][1] === ['slaid' => '5', 'serviceids' => ['101'], 'periods' => 1],
+    'Native API chooses current reporting boundaries and timezone without an arbitrary period_from');
+API::$slas = [$sla_base + ['slaid' => '5', 'name' => 'Production SLA', 'slo' => '97.25']];
+foreach ([-1, null, 0, 100, 101] as $value) {
+    API::$sli['5'] = ['periods' => [['period_from' => 100, 'period_to' => 200]], 'serviceids' => [101],
+        'sli' => [[array_merge($cell, ['sli' => $value, 'uptime' => 0])]]];
+    $result = $read_sla()['slas'][0];
+    $available = $value === 0 || $value === 100;
+    check(($result['sli_state'] === 'available') === $available, 'Zero is a valid SLI; undefined or invalid values are unavailable');
+    check($result['uptime'] === ($available ? '0s' : null), 'Unavailable SLI must not fabricate duration values');
+}
+API::$slas[0]['status'] = ZBX_SLA_STATUS_DISABLED;
+API::$calls = [];
+check($read_sla()['slas'][0]['sli_state'] === 'disabled', 'Disabled SLAs retain their configuration');
+check(count(API::$calls) === 1, 'Disabled SLAs must not calculate SLI');
+foreach ([false, new Exception('Denied')] as $failure) {
+    API::$slas = $failure;
+    $result = $read_sla();
+    check($result['sla_state'] === 'unavailable' && $result['has_sla'] === null, 'Lookup errors cannot prove no SLA');
+}
+API::$slas = [];
+$cached_controller = new ServiceControllerFixture();
+API::$calls = [];
+$sla_method->invoke($cached_controller, '101'); $sla_method->invoke($cached_controller, '101');
+check(count(API::$calls) === 1, 'Duplicate lookups within a request use its local cache');
+$read_sla();
+check(count(API::$calls) === 2, 'New controller instances must not reuse another request or user cache');
 
 API::$event = [];
 $controller = new ServiceControllerFixture(['eventid' => '999']);
@@ -200,10 +268,13 @@ $data = $overview();
 check(!$data['can_acknowledge'] && !$data['can_close'], 'Role restrictions hide both controls');
 CController::$denied = [];
 API::$event['acknowledges'][] = ['action' => ZBX_PROBLEM_UPDATE_CLOSE];
-check(!$overview()['can_close'], 'Pending closure must hide the close control');
+$closing = $overview();
+check(!$closing['can_close'] && $closing['closing_pending'], 'Pending closure hides the close control and enables recovery tracking');
 API::$event['acknowledges'] = [$ack];
 API::$event['r_eventid'] = '2';
-check(!$overview()['can_close'], 'Resolved problems cannot be manually closed');
+$recovered = $overview();
+check(!$recovered['can_close'], 'Resolved problems cannot be manually closed');
+check($recovered['event']['recovery_clock'] === 220, 'Overview uses the actual recovery event timestamp');
 API::$event['r_eventid'] = '0';
 API::$trigger['manual_close'] = ZBX_TRIGGER_MANUAL_CLOSE_NOT_ALLOWED;
 check(!$overview()['can_close'], 'Trigger manual-close setting must be respected');

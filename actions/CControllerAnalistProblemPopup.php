@@ -135,6 +135,7 @@ class CControllerAnalistProblemPopup extends CController {
 
         $can_acknowledge = $tab === 'overview' && $this->checkAccess(CRoleHelper::ACTIONS_ACKNOWLEDGE_PROBLEMS);
         $can_close = false;
+        $closing_pending = false;
         if ($tab === 'overview' && !$recovery_eventid && $trigger
                 && (int) ($trigger['manual_close'] ?? 0) === ZBX_TRIGGER_MANUAL_CLOSE_ALLOWED
                 && $this->checkAccess(CRoleHelper::ACTIONS_CLOSE_PROBLEMS)) {
@@ -150,6 +151,7 @@ class CControllerAnalistProblemPopup extends CController {
                 foreach ($close_events[0]['acknowledges'] ?? [] as $acknowledge) {
                     if (((int) $acknowledge['action'] & ZBX_PROBLEM_UPDATE_CLOSE) !== 0) {
                         $can_close = false;
+                        $closing_pending = true;
                         break;
                     }
                 }
@@ -337,6 +339,7 @@ class CControllerAnalistProblemPopup extends CController {
             'is_fragment' => $this->getAction() === 'problemanalist.tab.get',
             'can_acknowledge' => $can_acknowledge,
             'can_close' => $can_close,
+            'closing_pending' => $closing_pending,
             'event' => $event,
             'trigger' => $trigger,
             'host' => $host,

@@ -9,11 +9,8 @@ use Exception;
 
 class CControllerAnalistServicePopup extends CController {
 
-	/**
-	 * Cache for SLI data to avoid repeated API calls
-	 */
-	private static $sliCache = [];
-	private static $cacheExpiry = 300; // Increased cache time to 5 minutes
+	/** Request-local cache; SLA visibility always belongs to the current user. */
+	private $slaCache = [];
 
 	/**
 	 * Initialize controller
@@ -143,27 +140,8 @@ class CControllerAnalistServicePopup extends CController {
 			// Enriquecer dados dos serviços com informações SLA e caminho completo
 			$enriched_services = [];
 			foreach ($services as $service) {
-				// Buscar dados SLI para cada serviço (com cache)
-				$sli_data = $this->getSLIDataOptimized($service['serviceid']);
-				
-				if ($sli_data) {
-					$service['sli'] = $sli_data['sli'];
-					$service['uptime'] = $sli_data['uptime'];
-					$service['downtime'] = $sli_data['downtime'];
-					$service['error_budget'] = $sli_data['error_budget'];
-					$service['has_sla'] = $sli_data['has_sla'];
-					$service['sla_id'] = $sli_data['sla_id'] ?? null;
-					$service['sla_name'] = $sli_data['sla_name'] ?? null;
-				} else {
-					$service['sli'] = null;
-					$service['uptime'] = null;
-					$service['downtime'] = null;
-					$service['error_budget'] = null;
-					$service['has_sla'] = false;
-					$service['sla_id'] = null;
-					$service['sla_name'] = null;
-				}
-				
+				$service = array_merge($service, $this->getSlaData((string) $service['serviceid']));
+
 				// Buscar caminho completo da hierarquia
 				$service['hierarchy_path'] = $this->getServiceHierarchyPath($service['serviceid']);
 				
@@ -215,31 +193,7 @@ class CControllerAnalistServicePopup extends CController {
 
 			$service = $services[0];
 
-			// Get SLI data using optimized method
-			$sli_data = $this->getSLIDataOptimized($serviceid);
-			
-			if ($sli_data) {
-				// Use the actual data from SLA API
-				$service['sli'] = $sli_data['sli'];
-				$service['uptime'] = $sli_data['uptime'];
-				$service['downtime'] = $sli_data['downtime'];
-				$service['error_budget'] = $sli_data['error_budget'];
-				$service['has_sla'] = $sli_data['has_sla'];
-				$service['sla_id'] = $sli_data['sla_id'] ?? null;
-				$service['sla_name'] = $sli_data['sla_name'] ?? null;
-			} else {
-				// No SLA data available
-				$service['sli'] = null;
-				$service['uptime'] = null;
-				$service['downtime'] = null;
-				$service['error_budget'] = null;
-				$service['has_sla'] = false;
-				$service['sla_id'] = null;
-				$service['sla_name'] = null;
-			}
-
-			// Get SLA information if available  
-			$service['sla_info'] = $this->getSLAInfo($serviceid);
+			$service = array_merge($service, $this->getSlaData($serviceid));
 
 			return [
 				'success' => true,
@@ -257,114 +211,64 @@ class CControllerAnalistServicePopup extends CController {
 		}
 	}
 
-	/**
-	 * Get SLI data with optimized caching and fast failure
-	 */
-	private function getSLIDataOptimized(string $serviceid): ?array {
-		// Check cache first
-		$cacheKey = 'sli_' . $serviceid;
-		if (isset(self::$sliCache[$cacheKey])) {
-			$cached = self::$sliCache[$cacheKey];
-			if ($cached['expiry'] > time()) {
-				return $cached['data'];
-			}
-			unset(self::$sliCache[$cacheKey]);
-		}
-
+	/** Read every configured SLA and its current reporting period using native SLA boundaries. */
+	private function getSlaData(string $serviceid): array {
+		if (isset($this->slaCache[$serviceid])) return $this->slaCache[$serviceid];
+		$result = ['has_sla' => null, 'sla_state' => 'unavailable', 'slas' => [],
+			'sli' => null, 'uptime' => null, 'downtime' => null, 'error_budget' => null,
+			'sla_id' => null, 'sla_name' => null, 'sla_info' => []];
 		try {
-			// Fast SLA lookup
-			$sli_data = $this->fastSlaLookup($serviceid);
-			
-			if ($sli_data) {
-				// Cache successful result
-				self::$sliCache[$cacheKey] = [
-					'data' => $sli_data,
-					'expiry' => time() + self::$cacheExpiry
-				];
-				return $sli_data;
-			}
-			
-			// Cache null result (shorter time)
-			self::$sliCache[$cacheKey] = [
-				'data' => null,
-				'expiry' => time() + 30
-			];
-			return null;
-			
-		} catch (Exception $e) {
-			// Cache error result
-			self::$sliCache[$cacheKey] = [
-				'data' => null,
-				'expiry' => time() + 15
-			];
-			return null;
-		}
-	}
-
-	/**
-	 * Fast SLA lookup with minimal API calls
-	 */
-	private function fastSlaLookup(string $serviceid): ?array {
-		// Check if SLA API is available
-		if (!class_exists('API') || !method_exists('API', 'SLA')) {
-			return null;
-		}
-
-		try {
-			// Get SLA for this service (optimized request)
-			$slas = API::SLA()->get([
-				'output' => ['slaid', 'name', 'slo'],
-				'serviceids' => [$serviceid],
-				'limit' => 1
+			$configured = API::Sla()->get([
+				'output' => ['slaid', 'name', 'slo', 'period', 'timezone', 'status', 'effective_date'],
+				'serviceids' => [$serviceid], 'sortfield' => 'name', 'sortorder' => 'ASC'
 			]);
-			
-			if (empty($slas)) {
-				return null;
+			if ($configured === false || !is_array($configured)) throw new Exception('SLA lookup failed');
+			$result['has_sla'] = (bool) $configured;
+			$result['sla_state'] = $configured ? 'configured' : 'none';
+			foreach ($configured as $sla) {
+				$entry = ['slaid' => $sla['slaid'], 'name' => $sla['name'], 'slo' => $sla['slo'],
+					'period' => $sla['period'], 'timezone' => $sla['timezone'], 'status' => $sla['status'],
+					'effective_date' => $sla['effective_date'], 'sli_state' => 'unavailable', 'sli' => null,
+					'uptime' => null, 'downtime' => null, 'error_budget' => null, 'reporting_period' => null];
+				if ((int) $sla['status'] === ZBX_SLA_STATUS_ENABLED) {
+					try {
+						$response = API::Sla()->getSli(['slaid' => $sla['slaid'], 'serviceids' => [$serviceid], 'periods' => 1]);
+						if (!is_array($response)) throw new Exception('SLI lookup failed');
+						$index = array_search($serviceid, array_map('strval', $response['serviceids'] ?? []), true);
+						$period_index = array_key_last($response['periods'] ?? []);
+						$cell = $index !== false && $period_index !== null
+							? ($response['sli'][$period_index][$index] ?? null) : null;
+						$entry['reporting_period'] = $period_index !== null ? $response['periods'][$period_index] : null;
+						if (is_array($cell) && is_numeric($cell['sli'] ?? null)
+								&& is_finite((float) $cell['sli']) && $cell['sli'] >= 0 && $cell['sli'] <= 100) {
+							$entry['sli_state'] = 'available';
+							$entry['sli'] = (float) $cell['sli'];
+							foreach (['uptime', 'downtime', 'error_budget'] as $field) {
+								if (isset($cell[$field]) && is_numeric($cell[$field])) {
+									$entry[$field] = $this->formatDuration((int) $cell[$field]);
+								}
+							}
+						}
+					} catch (Exception $e) {
+						// Keep the configured name and target even when calculation fails or access changes.
+					}
+				} else {
+					$entry['sli_state'] = 'disabled';
+				}
+				$result['slas'][] = $entry;
 			}
-
-			$sla = $slas[0];
-			
-			// Get SLI data
-			$sli_response = API::SLA()->getSli([
-				'slaid' => $sla['slaid'],
-				'serviceids' => [(int)$serviceid],
-				'periods' => 1,
-				'period_from' => time()
-			]);
-			
-			if (empty($sli_response) || 
-				!isset($sli_response['serviceids'], $sli_response['sli'])) {
-				return null;
+			// Preserve legacy summary fields, while the UI renders every configured SLA independently.
+			if ($result['slas']) {
+				$primary = $result['slas'][0];
+				foreach (['sli', 'uptime', 'downtime', 'error_budget'] as $field) $result[$field] = $primary[$field];
+				$result['sla_id'] = $primary['slaid'];
+				$result['sla_name'] = $primary['name'];
+				$result['sla_info'] = ['name' => $primary['name'], 'target' => $primary['slo'].'%'];
 			}
-
-			$serviceids = $sli_response['serviceids'];
-			$sli_data_array = $sli_response['sli'];
-			
-			$service_index = array_search((int)$serviceid, $serviceids);
-			if ($service_index === false || 
-				!isset($sli_data_array[$service_index]) || 
-				empty($sli_data_array[$service_index])) {
-				return null;
-			}
-
-			// Get most recent period data
-			$period_data = end($sli_data_array[$service_index]);
-			
-			return [
-				'sli' => $period_data['sli'] ?? null,
-				'uptime' => $this->formatDuration($period_data['uptime'] ?? 0),
-				'downtime' => $this->formatDuration($period_data['downtime'] ?? 0),
-				'error_budget' => $this->formatDuration($period_data['error_budget'] ?? 0),
-				'excluded_downtimes' => $period_data['excluded_downtimes'] ?? [],
-				'has_sla' => true,
-				'method' => 'optimized_sla_api',
-				'sla_name' => $sla['name'],
-				'sla_id' => $sla['slaid']
-			];
-			
 		} catch (Exception $e) {
-			return null;
+			// A failed or denied lookup cannot establish that a service has no SLA.
 		}
+		return $this->slaCache[$serviceid] = $result;
 	}
 
 	/**
@@ -393,20 +297,6 @@ class CControllerAnalistServicePopup extends CController {
 		$formatted = implode(' ', array_slice($parts, 0, 2)); // Show max 2 parts
 		
 		return $is_negative ? '-' . $formatted : $formatted;
-	}
-
-	/**
-	 * Get SLA information for a service
-	 */
-	private function getSLAInfo(string $serviceid): array {
-		try {
-			return [
-				'name' => 'Default SLA',
-				'target' => '99.9%'
-			];
-		} catch (Exception $e) {
-			return [];
-		}
 	}
 
 	/**

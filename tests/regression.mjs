@@ -39,6 +39,15 @@ export async function runRegression(fixture, asset, popupAsset, fragments = {}, 
         assert.equal(actionFixtures.fragment.inline, '', 'Overview refresh must return a fragment');
         assert(!actionFixtures.fragment.response.body.includes('role="tablist"'));
     }
+    if (actionFixtures.recovered) {
+        assert(actionFixtures.recovered.response.body.includes('Recovery time'));
+        assert(!actionFixtures.recovered.response.body.includes('data-problem-action="close"'));
+    }
+    if (actionFixtures.closing) {
+        assert(actionFixtures.closing.response.body.includes('Recovery time'));
+        assert(actionFixtures.closing.response.body.includes('Pending'));
+        assert(!actionFixtures.closing.response.body.includes('data-problem-action="close"'));
+    }
     new vm.Script(popupAsset);
     const exportsSource = popupAsset.replace('return {displayServicesTree, displayNoServicesMessage, selectService};',
         'return {displayServicesTree, displayNoServicesMessage, selectService, createServiceCard, createHierarchyPath, createServiceSlaInfo, getServiceStatusText, getServiceStatusClass};')
@@ -54,6 +63,23 @@ export async function runRegression(fixture, asset, popupAsset, fragments = {}, 
     assert(!card.includes('onclick='), 'Service actions must not embed JavaScript');
     assert(!serviceUi.createHierarchyPath([{...service, serviceid: '1" onclick="bad()'}]).includes('onclick="bad()'));
     assert(serviceUi.createServiceSlaInfo({...service, has_sla: true, sli: 99, uptime: payload}).includes('&lt;img'));
+    assert(serviceUi.createServiceSlaInfo(service).includes('No accessible SLA configured'));
+    assert(serviceUi.createServiceSlaInfo({...service, has_sla: null, sla_state: 'unavailable'})
+        .includes('SLA information unavailable'), 'Failed lookups must not claim no SLA');
+    assert(serviceUi.createServiceSlaInfo({...service, has_sla: true, sli: null}).includes('SLI unavailable'));
+    assert(!serviceUi.createServiceSlaInfo({...service, has_sla: true, sli: -1}).includes('No accessible SLA'));
+    assert(serviceUi.createServiceSlaInfo({...service, has_sla: true, sli: 0, uptime: '0s'}).includes('0.00%'));
+    const slaHtml = serviceUi.createServiceSlaInfo({...service, has_sla: true, sla_state: 'configured', slas: [
+        {name: payload, slo: '97.25', sli: 93.75, sli_state: 'available', uptime: '1h', downtime: '4m', error_budget: '-2m',
+            reporting_period: {period_from: 100, period_to: 200}},
+        {name: 'Critical SLA', slo: '99.95', sli: null, sli_state: 'unavailable'},
+        {name: 'Disabled SLA', slo: '95', sli: null, sli_state: 'disabled'}
+    ]});
+    assert(!slaHtml.includes('<img') && slaHtml.includes('&lt;img'), 'Configured SLA names must be escaped');
+    assert(slaHtml.includes('97.25%') && slaHtml.includes('99.95%'), 'Render every configured target');
+    assert(slaHtml.includes('93.75%') && slaHtml.includes('-2m'));
+    assert(slaHtml.includes('SLI unavailable') && slaHtml.includes('SLA disabled'));
+    assert(slaHtml.includes('Reporting period (UTC)'));
     for (const [value, label] of Object.entries(config.statusLabels)) {
         assert.equal(serviceUi.getServiceStatusText(Number(value)), label);
     }
@@ -121,6 +147,10 @@ export async function runRegression(fixture, asset, popupAsset, fragments = {}, 
     const pending = [];
     const frames = new Map();
     const overlays = new Map();
+    const recoveryTimers = new Map();
+    let recoveryTimerId = 0;
+    context.window.setTimeout = callback => { recoveryTimers.set(++recoveryTimerId, callback); return recoveryTimerId; };
+    context.window.clearTimeout = id => recoveryTimers.delete(id);
     let frameId = 0;
     context.window.requestAnimationFrame = callback => { frames.set(++frameId, callback); return frameId; };
     context.window.cancelAnimationFrame = id => frames.delete(id);
@@ -222,6 +252,56 @@ export async function runRegression(fixture, asset, popupAsset, fragments = {}, 
     rootC.dialogue.dispatch('dialogue.close'); await updating;
     assert(pending[8].options.signal.aborted, 'Pending updates also follow popup cleanup');
 
+    const rootD = popupRoot(); roots.set('d', rootD);
+    const overviewD = rootD.panels.find(panel => panel.dataset.tab === 'overview');
+    let pendingRow = '';
+    let pendingInsertions = 0;
+    let ageRemoved = false;
+    let overviewMarkup = '';
+    Object.defineProperty(overviewD, 'innerHTML', {
+        get() { return overviewMarkup; },
+        set(value) { overviewMarkup = value; pendingRow = ''; }
+    });
+    overviewD.querySelector = selector => {
+        if (selector === '[data-recovery-row]') return pendingRow ? {} : null;
+        if (selector === '[data-age-row]') return {remove() { ageRemoved = true; }};
+        if (selector === '.analist-problem-detail-table tbody') return {
+            insertAdjacentHTML(position, value) { pendingRow = value; pendingInsertions++; }
+        };
+        return null;
+    };
+    const popupD = Popup.mount({...config, rootId: 'd', problemActions: {...actions, recoveryReady: false}});
+    updating = popupD.updateProblem('close');
+    pending[9].resolve({success: {title: 'Event updated'}});
+    while (pending.length < 11) await Promise.resolve();
+    pending[10].resolve({body: 'Closing overview', problem_actions: {...actions, recoveryReady: false, canClose: false}});
+    await updating;
+    assert.equal(recoveryTimers.size, 1, 'Accepted close must track asynchronous recovery');
+    assert(ageRemoved && pendingRow.includes('Recovery time') && pendingRow.includes('Pending'),
+        'An accepted close immediately displays a pending Recovery time row');
+    const nextRecovery = () => {
+        const [id, callback] = recoveryTimers.entries().next().value;
+        recoveryTimers.delete(id); return callback();
+    };
+    let refreshing = nextRecovery();
+    pending[11].resolve({error: {messages: ['Temporary read failure']}}); await refreshing;
+    assert.equal(recoveryTimers.size, 1, 'Transient refresh errors must not lose pending recovery');
+    popupD.activeTab = 'graphs';
+    refreshing = nextRecovery();
+    pending[12].resolve({body: 'Recovered overview: Recovery time', problem_actions: {...actions, recoveryReady: true, canClose: false}});
+    await refreshing;
+    assert(popupD.panels.get('overview').innerHTML.includes('Recovery time'));
+    assert.equal(popupD.activeTab, 'graphs', 'Recovery refresh must preserve the selected tab');
+    assert.equal(recoveryTimers.size, 0, 'Tracking stops once the real recovery time is available');
+    popupD.waitingForRecovery = true; popupD.scheduleRecoveryRefresh();
+    rootD.dialogue.dispatch('dialogue.close');
+    assert.equal(recoveryTimers.size, 0, 'Closing the popup cancels recovery tracking');
+    const rootE = popupRoot(); roots.set('e', rootE);
+    const popupE = Popup.mount({...config, rootId: 'e', problemActions: {...actions, closingPending: true, recoveryReady: false}});
+    assert.equal(recoveryTimers.size, 1, 'A mounted popup resumes server-reported pending closure automatically');
+    popupE.destroy();
+    assert.equal(recoveryTimers.size, 0);
+
     // A small table fixture checks column alignment and idempotence independently of a browser.
     class Element {
         constructor(tagName) { this.tagName = tagName.toUpperCase(); this.children = []; this.className = ''; this.colSpan = 1; }
@@ -295,7 +375,7 @@ if (typeof process !== 'undefined' && process.argv[1] && path.resolve(process.ar
         return JSON.parse(result.stdout);
     }
     const fragments = Object.fromEntries(['host', 'timeline', 'patterns', 'graphs', 'update'].map(tab => [tab, render(tab)]));
-    const actionFixtures = Object.fromEntries(['readonly', 'permitted', 'acknowledged', 'ack-only', 'fragment']
+    const actionFixtures = Object.fromEntries(['readonly', 'permitted', 'acknowledged', 'ack-only', 'fragment', 'recovered', 'closing']
         .map(scenario => [scenario, render('overview', scenario)]));
     await runRegression(render('overview'), fs.readFileSync(path.join(root, 'assets/js/analist-problem.js'), 'utf8'),
         fs.readFileSync(path.join(root, 'assets/js/analist-popup.js'), 'utf8'), fragments, actionFixtures);

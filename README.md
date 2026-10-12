@@ -32,6 +32,8 @@ This module provides a historical analysis of specific problems in Zabbix, offer
 - **Time format behavior**: All pattern charts and filters use the Zabbix frontend/user timezone. The 12-month window includes the event month and the preceding 11 calendar months; last-week comparisons use the calendar week preceding the selected event's week.
 - **Graph aggregation**: Pulls item data to show a compact set of charts around the incident window.
 - **Service impact matching**: Every service `problem_tags` rule must match an event tag, using Zabbix's case-sensitive equals/contains operators. Events without tags return no impacted services; inaccessible events and failed requests display an error.
+- **SLA accuracy**: Service cards show every accessible configured SLA name and SLO target, with SLI for its current reporting period. Zabbix computes period boundaries using the SLA's reporting frequency and timezone; displayed timestamps are UTC. Disabled SLAs and unavailable SLI retain their configuration. Empty SLA results show "No accessible SLA configured"; failed lookups show "SLA information unavailable". No default SLA or target is invented.
+- **JavaScript structure**: Popup behavior lives in `assets/js/analist-popup.js`. The PHP view emits markup, configuration, and one mount call.
 
 Regression check instructions are in [tests/README.md](tests/README.md).
 

@@ -25,3 +25,8 @@ These are regression checks, not a substitute for authenticated browser testing 
 Overview action checks cover role restrictions, writable triggers, manual-close settings, resolved/pending-close events, button rendering, native update parameters and CSRF token submission, duplicate-click prevention, error recovery, and cache invalidation after updates. All submissions use fixtures; the checks do not acknowledge or close real events.
 
 Graph checks verify reserved image dimensions, frontend-relative URLs, a native popup layout update after late image loads or failures, batched layout callbacks, and cleanup of image listeners and pending callbacks on close.
+
+Manual-close checks cover delayed recovery, transient read failures, displaying the actual recovery event timestamp and Recovery time row, preserving the selected tab, and cancelling recovery tracking when the popup closes.
+They also verify an immediate Pending row after an accepted close and automatic recovery tracking when a popup mounts with a server-reported pending closure.
+
+SLA checks cover configured names and targets, multiple SLAs, disabled SLAs, lookup failures versus absent configuration, unavailable/zero SLI, period-first response indexing, service ID mapping, reporting periods, negative error budgets, escaping, and request-local cache isolation.

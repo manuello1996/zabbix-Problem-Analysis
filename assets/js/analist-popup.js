@@ -505,6 +505,7 @@
     function createServiceUi(popup) {
         const root = popup.root;
         const serviceStatusLabels = popup.config.statusLabels;
+        const slaLabels = popup.config.slaLabels;
         let currentServices = [];
         let currentServiceId = null;
         function escapeServiceHtml(value) {
@@ -547,20 +548,40 @@
         }
 
         function createServiceSlaInfo(service) {
-            if (!service.has_sla || service.sli === null || service.sli === undefined) {
-                return '<div class="service-no-sla">No SLA configured</div>';
+            const state = service.sla_state || (service.has_sla === false ? 'none'
+                : service.has_sla === true ? 'configured' : 'unavailable');
+            if (state === 'none') {
+                return '<div class="service-no-sla">' + escapeServiceHtml(slaLabels.none) + '</div>';
             }
-            const sli = Number(service.sli);
-            const rows = [
-                ["SLI", Number.isFinite(sli) && sli >= 0 ? sli.toFixed(2) + "%" : "N/A"],
-                ["Uptime", service.uptime || "N/A"],
-                ["Downtime", service.downtime || "N/A"],
-                ["Error Budget", service.error_budget || "N/A"]
-            ];
-            return '<div class="service-sla-info">' + rows.map(row =>
-                '<div class="sla-item"><span class="sla-label">' + row[0]
-                + ':</span><span class="sla-value">' + escapeServiceHtml(row[1]) + '</span></div>'
-            ).join("") + '</div>';
+            if (state !== 'configured') {
+                return '<div class="service-no-sla">' + escapeServiceHtml(slaLabels.unknown) + '</div>';
+            }
+            const slas = Array.isArray(service.slas) && service.slas.length ? service.slas : [{
+                name: service.sla_name, slo: service.sla_info?.target?.replace(/%$/, ''),
+                sli: service.sli, uptime: service.uptime, downtime: service.downtime, error_budget: service.error_budget
+            }];
+            return '<div class="service-sla-info">' + slas.map(sla => {
+                const sli = Number(sla.sli);
+                const available = sla.sli !== null && sla.sli !== undefined && sla.sli !== ''
+                    && Number.isFinite(sli) && sli >= 0 && sli <= 100
+                    && (!sla.sli_state || sla.sli_state === 'available');
+                const rows = [];
+                if (sla.name !== undefined && sla.name !== null) rows.push([slaLabels.sla, sla.name]);
+                if (sla.slo !== undefined && sla.slo !== null) rows.push([slaLabels.target, String(sla.slo) + '%']);
+                const period = sla.reporting_period;
+                if (period && Number.isFinite(Number(period.period_from)) && Number.isFinite(Number(period.period_to))) {
+                    const format = timestamp => new Date(Number(timestamp) * 1000).toISOString().slice(0, 16).replace('T', ' ');
+                    rows.push([slaLabels.period, format(period.period_from) + ' – ' + format(period.period_to)]);
+                }
+                rows.push([slaLabels.sli, available ? sli.toFixed(2) + '%'
+                    : sla.sli_state === 'disabled' ? slaLabels.disabled : slaLabels.unavailable]);
+                if (available) rows.push([slaLabels.uptime, sla.uptime ?? 'N/A'],
+                    [slaLabels.downtime, sla.downtime ?? 'N/A'], [slaLabels.budget, sla.error_budget ?? 'N/A']);
+                return '<div class="service-sla-entry">' + rows.map(row =>
+                    '<div class="sla-item"><span class="sla-label">' + escapeServiceHtml(row[0])
+                    + ':</span><span class="sla-value">' + escapeServiceHtml(row[1]) + '</span></div>'
+                ).join('') + '</div>';
+            }).join('') + '</div>';
         }
 
         function createServiceCard(service, isImpacted = false) {
@@ -677,6 +698,9 @@
             this.patternRenderer = null;
             this.updatingProblem = false;
             this.layoutFrame = null;
+            this.recoveryTimer = null;
+            this.waitingForRecovery = false;
+            this.recoveryDelay = 1000;
             root.addEventListener('click', event => this.onClick(event), {signal: this.lifecycle.signal});
             root.addEventListener('keydown', event => this.onKeyDown(event), {signal: this.lifecycle.signal});
             // Image sizing changes do not trigger Zabbix 7.0's content mutation observer.
@@ -689,6 +713,23 @@
             this.dialogue?.addEventListener('dialogue.close', () => this.destroy(),
                 {once: true, signal: this.lifecycle.signal});
             this.activateTab('overview');
+            this.trackPendingRecovery();
+        }
+
+        trackPendingRecovery() {
+            if (this.closed || !this.config.problemActions?.closingPending
+                    || this.config.problemActions.recoveryReady) return;
+            this.waitingForRecovery = true;
+            const panel = this.panels.get('overview');
+            if (!panel.querySelector('[data-recovery-row]')) {
+                panel.querySelector('[data-age-row]')?.remove();
+                panel.querySelector('.analist-problem-detail-table tbody')
+                    ?.insertAdjacentHTML('beforeend', this.config.problemActions.pendingRecoveryRow);
+            }
+            const message = this.root.querySelector('[data-problem-action-message]');
+            if (message) message.textContent = this.config.problemActions.closingLabel;
+            this.scheduleLayout();
+            this.scheduleRecoveryRefresh();
         }
 
         onClick(event) {
@@ -793,7 +834,17 @@
                     if (typeof result.body !== 'string') throw new Error('Invalid tab response');
                     panel.innerHTML = result.body;
                     if (key === 'overview' && result.problem_actions) {
+                        if (this.waitingForRecovery && !result.problem_actions.recoveryReady) {
+                            result.problem_actions.closingPending = true;
+                        }
                         this.config.problemActions = result.problem_actions;
+                        if (result.problem_actions.recoveryReady) {
+                            this.waitingForRecovery = false;
+                            if (this.recoveryTimer !== null) window.clearTimeout(this.recoveryTimer);
+                            this.recoveryTimer = null;
+                        } else {
+                            this.trackPendingRecovery();
+                        }
                     }
                     if (key === 'patterns') {
                         if (!result.pattern_data) throw new Error('Invalid pattern response');
@@ -820,7 +871,7 @@
             this.requests.add(controller);
             try {
                 const response = await fetch('zabbix.php?action=' + encodeURIComponent(action), {
-                    method: 'POST', body: new URLSearchParams(params), signal: controller.signal
+                    method: 'POST', body: new URLSearchParams(params), signal: controller.signal, cache: 'no-store'
                 });
                 if (!response.ok) throw new Error('HTTP error! status: ' + response.status);
                 const result = await response.json();
@@ -870,6 +921,10 @@
                 });
                 if (!result.success) throw new Error('Unable to update event');
                 updated = true;
+                if (action === 'close') {
+                    this.config.problemActions.closingPending = true;
+                    this.trackPendingRecovery();
+                }
                 // Historical panels may now contain stale acknowledgements or close state.
                 for (const request of this.requests) request.abort();
                 this.tabs.clear();
@@ -877,6 +932,10 @@
                 await this.activateTab('overview');
                 const refreshedMessage = this.root.querySelector('[data-problem-action-message]');
                 if (refreshedMessage) refreshedMessage.textContent = actions.updatedLabel;
+                if (action === 'close' && !this.config.problemActions.recoveryReady) {
+                    this.config.problemActions.closingPending = true;
+                    this.trackPendingRecovery();
+                }
                 if (!this.tabs.get('overview')?.loaded && !this.closed) {
                     const panel = this.panels.get('overview');
                     panel.querySelector('[role="alert"]')?.replaceChildren(actions.refreshErrorLabel);
@@ -890,9 +949,46 @@
             }
         }
 
+        scheduleRecoveryRefresh() {
+            if (this.closed || !this.waitingForRecovery || this.recoveryTimer !== null) return;
+            this.recoveryTimer = window.setTimeout(async () => {
+                this.recoveryTimer = null;
+                if (this.closed) return;
+                try {
+                    const params = {eventid: this.config.eventData.eventid, tab: 'overview'};
+                    if (this.config.eventData.hostid) params.hostid = this.config.eventData.hostid;
+                    const result = await this.fetchJson('problemanalist.tab.get', params);
+                    if (typeof result.body !== 'string' || !result.problem_actions) throw new Error('Invalid overview response');
+                    // Refresh the existing panel without changing the tab the user is viewing.
+                    this.panels.get('overview').innerHTML = result.body;
+                    this.config.problemActions = result.problem_actions;
+                    this.tabs.set('overview', {loaded: true, promise: null});
+                    this.waitingForRecovery = !result.problem_actions.recoveryReady;
+                    if (this.waitingForRecovery) {
+                        this.config.problemActions.closingPending = true;
+                        this.trackPendingRecovery();
+                    }
+                    const message = this.root.querySelector('[data-problem-action-message]');
+                    if (message) message.textContent = this.waitingForRecovery
+                        ? result.problem_actions.closingLabel : result.problem_actions.updatedLabel;
+                    this.scheduleLayout();
+                } catch (error) {
+                    if (this.closed) return;
+                    const message = this.root.querySelector('[data-problem-action-message]');
+                    if (message) message.textContent = this.config.problemActions.closingLabel + ' ' + error.message;
+                    // A transient read failure must not lose tracking of an accepted manual close.
+                }
+                this.recoveryDelay = Math.min(this.recoveryDelay * 2, 5000);
+                this.scheduleRecoveryRefresh();
+            }, this.recoveryDelay);
+        }
+
         destroy() {
             if (this.closed) return;
             this.closed = true;
+            if (this.recoveryTimer !== null) window.clearTimeout(this.recoveryTimer);
+            this.recoveryTimer = null;
+            this.waitingForRecovery = false;
             if (this.layoutFrame !== null) window.cancelAnimationFrame(this.layoutFrame);
             this.layoutFrame = null;
             this.lifecycle.abort();
