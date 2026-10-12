@@ -18,6 +18,10 @@ class CSeverityHelper {
     public static function getName($severity) {
         return ['Not classified', 'Information', 'Warning', 'Average', 'High', 'Disaster'][$severity];
     }
+    public static function getStatusStyle($severity) {
+        return [ZBX_STYLE_STATUS_NA_BG, ZBX_STYLE_STATUS_INFO_BG, ZBX_STYLE_STATUS_WARNING_BG,
+            ZBX_STYLE_STATUS_AVERAGE_BG, ZBX_STYLE_STATUS_HIGH_BG, ZBX_STYLE_STATUS_DISASTER_BG][$severity] ?? null;
+    }
     public static function makeSeverityCell($severity) { return new CCol(self::getName($severity)); }
 }
 class CWebUser {

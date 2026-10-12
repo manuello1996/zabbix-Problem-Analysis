@@ -144,6 +144,12 @@ class CControllerAnalistServicePopup extends CController {
 
 				// Buscar caminho completo da hierarquia
 				$service['hierarchy_path'] = $this->getServiceHierarchyPath($service['serviceid']);
+                // Preload visible hierarchy services using the same request-local SLA cache.
+                foreach ($service['hierarchy_path'] as &$related_service) {
+                    $related_service = array_merge($related_service,
+                        $this->getSlaData((string) $related_service['serviceid']));
+                }
+                unset($related_service);
 				
 				$enriched_services[] = $service;
 			}

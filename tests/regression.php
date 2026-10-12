@@ -138,6 +138,23 @@ API::$services = [
 $result = $list->invoke($service_controller, ['eventid' => '1'], $tags);
 check($result['success'] && array_column($result['data'], 'serviceid') === ['101'], 'Only matching services may be enriched and returned');
 
+// Shared visible ancestors are preloaded once, with an explicit SLA state.
+API::$services[0]['parents'] = [['serviceid' => '99']];
+API::$services[] = array_merge($service_base, ['serviceid' => '103', 'name' => 'Second match',
+    'parents' => [['serviceid' => '99']], 'problem_tags' => [$like('env', 'prod')]]);
+API::$services[] = $service_base + ['serviceid' => '99', 'name' => 'Parent', 'problem_tags' => []];
+API::$calls = [];
+$result = $list->invoke(new ServiceControllerFixture(), ['eventid' => '1'], $tags);
+check(count($result['data']) === 2, 'Related services do not become direct matches');
+foreach ($result['data'] as $service) {
+    check($service['hierarchy_path'][0]['serviceid'] === '99'
+        && $service['hierarchy_path'][0]['sla_state'] === 'none', 'Related services include preloaded SLA state');
+}
+$parent_sla_calls = array_filter(API::$calls, static function ($call) {
+    return $call[0] === 'sla' && $call[1]['serviceids'] === ['99'];
+});
+check(count($parent_sla_calls) === 1, 'Shared parent SLA is loaded once per request');
+
 $sla_method = new ReflectionMethod($service_controller, 'getSlaData');
 $read_sla = static function () use ($sla_method) {
     return $sla_method->invoke(new ServiceControllerFixture(), '101');

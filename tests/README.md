@@ -30,3 +30,4 @@ Manual-close checks cover delayed recovery, transient read failures, displaying 
 They also verify an immediate Pending row after an accepted close and automatic recovery tracking when a popup mounts with a server-reported pending closure.
 
 SLA checks cover configured names and targets, multiple SLAs, disabled SLAs, lookup failures versus absent configuration, unavailable/zero SLI, period-first response indexing, service ID mapping, reporting periods, negative error budgets, escaping, and request-local cache isolation.
+Services interaction checks cover per-card hierarchies, escaped tag-rule explanations, search by service or ancestor name, empty search results, shared refresh requests, expanded selected cards, and visible refresh success/error feedback.

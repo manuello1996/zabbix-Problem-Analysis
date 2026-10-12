@@ -506,8 +506,9 @@
         const root = popup.root;
         const serviceStatusLabels = popup.config.statusLabels;
         const slaLabels = popup.config.slaLabels;
+        const labels = popup.config.serviceLabels;
+        const serviceRequests = new Map();
         let currentServices = [];
-        let currentServiceId = null;
         function escapeServiceHtml(value) {
             return String(value ?? "").replace(/&/g, "&amp;").replace(/</g, "&lt;")
                 .replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/\x27/g, "&#39;");
@@ -523,25 +524,46 @@
         }
 
         function displayServicesTree(services) {
-            const treeContainer = root.querySelector("#services-tree-container");
-            if (!treeContainer) return;
-            const impactedService = services[0];
-            const path = impactedService.hierarchy_path?.length
-                ? impactedService.hierarchy_path : [impactedService];
-            let html = '<div class="services-container"><div class="services-summary-header"><h4>Impacted Services ('
-                + services.length + ')</h4><p>Services matching this event’s tags</p></div>'
-                + createHierarchyPath(path) + createServiceCard(impactedService, true);
-            if (services.length > 1) {
-                html += '<div><h5>Other Impacted Services</h5>'
-                    + services.slice(1).map(service => createServiceCard(service, true)).join("") + '</div>';
-            }
-            treeContainer.innerHTML = html + '</div>';
+            const tree = root.querySelector('#services-tree-container');
+            if (!tree) return;
             currentServices = services;
-            currentServiceId = impactedService.serviceid;
+            const matchedIds = new Set(services.map(service => String(service.serviceid)));
+            const relatedServices = new Map();
+            services.forEach(service => (service.hierarchy_path || []).forEach(parent => {
+                const id = String(parent.serviceid);
+                if (!matchedIds.has(id) && !relatedServices.has(id)) relatedServices.set(id, parent);
+            }));
+            const relatedHtml = relatedServices.size
+                ? '<details class="analist-related-services" data-services-related><summary>'
+                    + escapeServiceHtml(labels.related) + ' (' + relatedServices.size + ')</summary>'
+                    + '<div class="analist-services-list">'
+                    + Array.from(relatedServices.values(), service => createServiceCard(service)).join('')
+                    + '</div></details>' : '';
+            tree.innerHTML = '<div class="services-summary-header"><h4>' + escapeServiceHtml(labels.matching)
+                + ' (' + services.length + ')</h4><p>' + escapeServiceHtml(labels.current) + '</p></div>'
+                + '<div class="analist-services-toolbar"><label>' + escapeServiceHtml(labels.search)
+                + '<input type="search" data-services-search autocomplete="off"></label>'
+                + '<button type="button" class="btn-alt" data-refresh-services>' + escapeServiceHtml(labels.refresh) + '</button></div>'
+                + '<div class="analist-services-list" data-services-matching>' + services.map(service => createServiceCard(service, true)).join('') + '</div>'
+                + '<p data-services-search-empty role="status" hidden>' + escapeServiceHtml(labels.empty) + '</p>'
+                + relatedHtml;
+        }
+
+        function filterServices(query) {
+            const normalized = query.trim().toLocaleLowerCase();
+            const ids = new Set(currentServices.filter(service =>
+                [service.name, ...(service.hierarchy_path || []).map(parent => parent.name)]
+                    .some(name => String(name || '').toLocaleLowerCase().includes(normalized)))
+                .map(service => String(service.serviceid)));
+            root.querySelectorAll('[data-services-matching] .service-card').forEach(card => {
+                card.hidden = !ids.has(card.dataset.serviceid);
+            });
+            const empty = root.querySelector('[data-services-search-empty]');
+            if (empty) empty.hidden = ids.size > 0;
         }
 
         function createHierarchyPath(path) {
-            return '<div class="services-hierarchy-path"><span class="hierarchy-label">Hierarchy:</span>'
+            return '<div class="services-hierarchy-path"><span class="hierarchy-label">' + escapeServiceHtml(labels.hierarchy) + ':</span>'
                 + path.map(service => '<button type="button" class="btn-link hierarchy-service" data-service-action="'
                     + escapeServiceHtml(service.serviceid) + '">' + escapeServiceHtml(service.name) + '</button>')
                     .join('<span class="hierarchy-arrow"> → </span>') + '</div>';
@@ -573,33 +595,54 @@
                     const format = timestamp => new Date(Number(timestamp) * 1000).toISOString().slice(0, 16).replace('T', ' ');
                     rows.push([slaLabels.period, format(period.period_from) + ' – ' + format(period.period_to)]);
                 }
-                rows.push([slaLabels.sli, available ? sli.toFixed(2) + '%'
+                const target = Number(sla.slo);
+                const comparison = available && sla.slo !== undefined && sla.slo !== null && Number.isFinite(target)
+                    ? ' (' + (sli >= target ? slaLabels.met : slaLabels.below) + ')' : '';
+                rows.push([slaLabels.sli, available ? sli.toFixed(2) + '%' + comparison
                     : sla.sli_state === 'disabled' ? slaLabels.disabled : slaLabels.unavailable]);
                 if (available) rows.push([slaLabels.uptime, sla.uptime ?? 'N/A'],
                     [slaLabels.downtime, sla.downtime ?? 'N/A'], [slaLabels.budget, sla.error_budget ?? 'N/A']);
-                return '<div class="service-sla-entry">' + rows.map(row =>
-                    '<div class="sla-item"><span class="sla-label">' + escapeServiceHtml(row[0])
-                    + ':</span><span class="sla-value">' + escapeServiceHtml(row[1]) + '</span></div>'
-                ).join('') + '</div>';
+                return '<div class="service-sla-entry"><table class="list-table analist-sla-table"><tbody>' + rows.map(row =>
+                    '<tr><th scope="row">' + escapeServiceHtml(row[0])
+                    + '</th><td>' + escapeServiceHtml(row[1]) + '</td></tr>'
+                ).join('') + '</tbody></table></div>';
             }).join('') + '</div>';
+        }
+
+        function serviceSlaSummary(service) {
+            return service.slas?.length ? service.slas.length + ' ' + labels.slas
+                : service.has_sla === false ? slaLabels.none : slaLabels.unknown;
         }
 
         function createServiceCard(service, isImpacted = false) {
             const id = escapeServiceHtml(service.serviceid);
-            return '<div class="service-card' + (isImpacted ? ' service-card-impacted' : '')
-                + '" data-serviceid="' + id + '"><div class="service-header"><div class="service-name">'
-                + '<button type="button" class="btn-link service-name-link" data-service-action="' + id + '">'
-                + escapeServiceHtml(service.name) + '</button>'
-                + (isImpacted ? '<span class="impacted-badge">Impacted</span>' : '')
-                + '</div><div class="service-status ' + getServiceStatusClass(service.status) + '">'
-                + escapeServiceHtml(getServiceStatusText(service.status)) + '</div></div>'
-                + createServiceSlaInfo(service) + '</div>';
+            const path = service.hierarchy_path || [];
+            const rules = isImpacted && service.problem_tags?.length
+                ? '<div class="analist-service-rules"><table class="list-table analist-service-rules-table">'
+                    + '<caption>' + escapeServiceHtml(labels.rules) + '</caption>'
+                    + '<thead><tr><th scope="col">' + escapeServiceHtml(labels.tag) + '</th>'
+                    + '<th scope="col">' + escapeServiceHtml(labels.operator) + '</th>'
+                    + '<th scope="col">' + escapeServiceHtml(labels.value) + '</th></tr></thead><tbody>'
+                    + service.problem_tags.map(rule => '<tr><td>' + escapeServiceHtml(rule.tag) + '</td><td>'
+                        + escapeServiceHtml(Number(rule.operator) === labels.containsOperator ? labels.contains : labels.equals)
+                        + '</td><td>' + escapeServiceHtml(rule.value) + '</td></tr>').join('') + '</tbody></table></div>' : '';
+            return '<details class="service-card' + (isImpacted ? ' service-card-impacted' : '')
+                + '" data-serviceid="' + id + '"><summary class="service-header"><span class="service-name">'
+                + escapeServiceHtml(service.name) + '</span><span class="analist-service-summary">'
+                + '<span class="analist-service-match">' + escapeServiceHtml(isImpacted ? labels.matched : labels.context) + '</span>'
+                + '<span class="analist-service-match" data-service-sla-summary>' + escapeServiceHtml(serviceSlaSummary(service)) + '</span>'
+                + '<span class="service-status ' + getServiceStatusClass(service.status) + '">'
+                + escapeServiceHtml(getServiceStatusText(service.status)) + '</span></span></summary>'
+                + '<div class="analist-service-details">' + (path.length > 1 ? createHierarchyPath(path) : '')
+                + rules + '<h5 class="analist-service-details-heading">' + escapeServiceHtml(labels.details) + '</h5>'
+                + createServiceSlaInfo(service)
+                + '<button type="button" class="btn-alt" data-service-refresh data-service-action="' + id + '">'
+                + escapeServiceHtml(labels.refreshService) + '</button>'
+                + '<p data-service-feedback role="status" aria-live="polite"></p></div></details>';
         }
 
         function getServiceStatusClass(status) {
-            const classes = {"-1": "status-ok", 0: "status-not-classified", 1: "status-information",
-                2: "status-warning", 3: "status-average", 4: "status-high", 5: "status-disaster"};
-            return classes[status] || "status-unknown";
+            return popup.config.statusStyles[status] || "status-grey";
         }
 
         function getServiceStatusText(status) {
@@ -611,13 +654,28 @@
             return Array.from(cards).find(card => card.dataset.serviceid === String(serviceid));
         }
 
-        async function loadServiceSLI(serviceid) {
-            try {
-                const service = await requestServices({serviceid});
-                if (!popup.closed) updateServiceSLIDisplay(serviceid, service);
-            } catch (error) {
-                if (!popup.closed && error.name !== "AbortError") console.error("Error loading SLI data:", error);
-            }
+        function loadServiceSLI(serviceid) {
+            const key = String(serviceid);
+            if (serviceRequests.has(key)) return serviceRequests.get(key);
+            const card = findServiceCard(key);
+            const button = card?.querySelector('[data-service-refresh]');
+            const feedback = card?.querySelector('[data-service-feedback]');
+            if (button) button.disabled = true;
+            if (feedback) feedback.textContent = labels.refreshing;
+            const request = requestServices({serviceid: key}).then(service => {
+                if (popup.closed) return;
+                updateServiceSLIDisplay(key, service);
+                currentServices = currentServices.map(current => String(current.serviceid) === key ? {...current, ...service} : current);
+                if (feedback) feedback.textContent = labels.refreshed;
+                popup.scheduleLayout();
+            }).catch(error => {
+                if (!popup.closed && error.name !== 'AbortError' && feedback) feedback.textContent = error.message;
+            }).finally(() => {
+                serviceRequests.delete(key);
+                if (!popup.closed && button) button.disabled = false;
+            });
+            serviceRequests.set(key, request);
+            return request;
         }
 
         function updateServiceSLIDisplay(serviceid, service) {
@@ -628,41 +686,38 @@
             status.textContent = getServiceStatusText(service.status);
             const sla = card.querySelector(".service-sla-info, .service-no-sla");
             if (sla) sla.outerHTML = createServiceSlaInfo(service);
+            const summary = card.querySelector('[data-service-sla-summary]');
+            if (summary) summary.textContent = serviceSlaSummary(service);
         }
 
-        function selectService(serviceid) {
+        function selectService(serviceid, refresh = false) {
             const tree = root.querySelector("#services-tree-container");
             if (!tree) return;
             tree.querySelectorAll(".service-card").forEach(card => {
-                card.style.borderColor = "";
-                card.style.boxShadow = "";
+                card.classList.remove("is-selected");
             });
-            let selectedCard = findServiceCard(serviceid);
-            if (!selectedCard) {
-                const parent = (currentServices || []).flatMap(service => service.hierarchy_path || [])
-                    .find(service => String(service.serviceid) === String(serviceid));
-                if (parent) {
-                    tree.insertAdjacentHTML("beforeend", createServiceCard(parent));
-                    selectedCard = findServiceCard(serviceid);
-                }
-            }
+            const selectedCard = findServiceCard(serviceid);
             if (selectedCard) {
-                selectedCard.style.borderColor = "#007cba";
-                selectedCard.style.boxShadow = "0 0 10px rgba(0,124,186,0.3)";
+                const related = selectedCard.closest("[data-services-related]");
+                if (related) related.open = true;
+                selectedCard.open = true;
+                selectedCard.hidden = false;
+                selectedCard.classList.add("is-selected");
                 selectedCard.scrollIntoView({behavior: "smooth", block: "nearest"});
-                loadServiceSLI(serviceid);
+                popup.scheduleLayout();
+                if (refresh) return loadServiceSLI(serviceid);
             }
-            currentServiceId = serviceid;
         }
 
         function displayNoServicesMessage() {
             const tree = root.querySelector("#services-tree-container");
             if (!tree) return;
-            tree.innerHTML = '<div class="services-no-results"><p><strong>No impacted services found for this event.</strong></p>'
-                + '<p>No accessible service has problem-tag rules matching all required event tags.</p></div>';
+            tree.innerHTML = '<div class="services-no-results"><p><strong>' + escapeServiceHtml(labels.none) + '</strong></p>'
+                + '<p>' + escapeServiceHtml(labels.explanation) + '</p><button type="button" class="btn-alt" data-refresh-services>'
+                + escapeServiceHtml(labels.refresh) + '</button></div>';
         }
 
-        return {displayServicesTree, displayNoServicesMessage, selectService};
+        return {displayServicesTree, displayNoServicesMessage, selectService, filterServices};
     }
 
     class AnalistProblemPopup {
@@ -703,6 +758,12 @@
             this.recoveryDelay = 1000;
             root.addEventListener('click', event => this.onClick(event), {signal: this.lifecycle.signal});
             root.addEventListener('keydown', event => this.onKeyDown(event), {signal: this.lifecycle.signal});
+            root.addEventListener('input', event => {
+                if (event.target.matches('[data-services-search]')) this.serviceUi.filterServices(event.target.value);
+            }, {signal: this.lifecycle.signal});
+            root.addEventListener('toggle', event => {
+                if (event.target.matches('details.service-card, details.analist-related-services')) this.scheduleLayout();
+            }, {capture: true, signal: this.lifecycle.signal});
             // Image sizing changes do not trigger Zabbix 7.0's content mutation observer.
             const imageSettled = event => {
                 if (event.target.matches('img.chart-image')) this.scheduleLayout();
@@ -733,7 +794,7 @@
         }
 
         onClick(event) {
-            const button = event.target.closest('[data-tab-target], [data-retry-tab], [data-service-action], [data-problem-action], .mnz-pattern-toggle');
+            const button = event.target.closest('[data-tab-target], [data-retry-tab], [data-service-action], [data-refresh-services], [data-problem-action], .mnz-pattern-toggle');
             if (!button || !this.root.contains(button)) return;
             if (button.dataset.tabTarget) {
                 event.preventDefault();
@@ -743,7 +804,13 @@
                 this.loadTab(button.dataset.retryTab);
             } else if (button.dataset.serviceAction) {
                 event.preventDefault();
-                this.serviceUi.selectService(button.dataset.serviceAction);
+                this.serviceUi.selectService(button.dataset.serviceAction, button.hasAttribute("data-service-refresh"));
+            } else if (button.hasAttribute('data-refresh-services')) {
+                event.preventDefault();
+                if (!this.tabs.get('services')?.promise) {
+                    this.tabs.delete('services');
+                    this.loadTab('services');
+                }
             } else if (button.dataset.problemAction) {
                 event.preventDefault();
                 this.updateProblem(button.dataset.problemAction);

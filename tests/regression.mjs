@@ -49,8 +49,8 @@ export async function runRegression(fixture, asset, popupAsset, fragments = {}, 
         assert(!actionFixtures.closing.response.body.includes('data-problem-action="close"'));
     }
     new vm.Script(popupAsset);
-    const exportsSource = popupAsset.replace('return {displayServicesTree, displayNoServicesMessage, selectService};',
-        'return {displayServicesTree, displayNoServicesMessage, selectService, createServiceCard, createHierarchyPath, createServiceSlaInfo, getServiceStatusText, getServiceStatusClass};')
+    const exportsSource = popupAsset.replace('return {displayServicesTree, displayNoServicesMessage, selectService, filterServices};',
+        'return {displayServicesTree, displayNoServicesMessage, selectService, filterServices, createServiceCard, createHierarchyPath, createServiceSlaInfo, getServiceStatusText, getServiceStatusClass};')
         .replace('window.AnalistProblemPopup = AnalistProblemPopup;',
         'window.createServiceUi = createServiceUi; window.AnalistProblemPopup = AnalistProblemPopup;');
     vm.runInContext(exportsSource, context);
@@ -80,12 +80,70 @@ export async function runRegression(fixture, asset, popupAsset, fragments = {}, 
     assert(slaHtml.includes('93.75%') && slaHtml.includes('-2m'));
     assert(slaHtml.includes('SLI unavailable') && slaHtml.includes('SLA disabled'));
     assert(slaHtml.includes('Reporting period (UTC)'));
+    assert(slaHtml.includes('Below target'), 'Available SLI is compared with its configured target');
+    const serviceCards = new Map(['1', '2'].map(id => [id, {
+        dataset: {serviceid: id}, closest() { return null; }, style: {}, classList: {add() {}, remove() {}}, open: false, hidden: false,
+        status: {}, sla: {}, button: {disabled: false}, feedback: {}, scrollIntoView() {},
+        querySelector(selector) {
+            return selector === '.service-status' ? this.status
+                : selector === '[data-service-refresh]' ? this.button
+                : selector === '[data-service-feedback]' ? this.feedback : this.sla;
+        }
+    }]));
+    const emptySearch = {hidden: true};
+    const treeFixture = {innerHTML: '', querySelectorAll: () => [...serviceCards.values()]};
+    let detailRequests = 0;
+    let detailResolve;
+    const serviceRoot = {
+        querySelector(selector) { return selector === '#services-tree-container' ? treeFixture : emptySearch; },
+        querySelectorAll() { return [...serviceCards.values()]; }
+    };
+    const servicesPopup = {root: serviceRoot, config, closed: false, scheduleLayout() {},
+        fetchJson() { detailRequests++; return new Promise(resolve => { detailResolve = resolve; }); }};
+    const interactiveServices = context.window.createServiceUi(servicesPopup);
+    interactiveServices.displayServicesTree([
+        {serviceid: '1', name: 'Database', status: -1, has_sla: false,
+            hierarchy_path: [{serviceid: '9', name: 'Platform'}, {serviceid: '1', name: 'Database'}],
+            problem_tags: [{tag: 'app', operator: 0, value: payload}]},
+        {serviceid: '2', name: 'Web', status: 2, has_sla: false,
+            hierarchy_path: [{serviceid: '9', name: 'Platform'}, {serviceid: '8', name: 'Applications'}, {serviceid: '2', name: 'Web'}]}
+    ]);
+    assert.equal((treeFixture.innerHTML.match(/class="services-hierarchy-path"/g) || []).length, 2,
+        'Each matching service renders its own hierarchy');
+    assert(treeFixture.innerHTML.includes('data-services-search') && treeFixture.innerHTML.includes('data-refresh-services'));
+    assert(treeFixture.innerHTML.includes('Matching tag rules') && !treeFixture.innerHTML.includes('<img'));
+    assert(treeFixture.innerHTML.includes('<details class="analist-related-services" data-services-related><summary>Related services (2)'),
+        'Related services are preloaded in a collapsed group');
+    assert.equal((treeFixture.innerHTML.match(/data-serviceid="9"/g) || []).length, 1,
+        'A shared ancestor is rendered only once');
+    assert.equal((treeFixture.innerHTML.match(/data-serviceid="1"/g) || []).length, 1,
+        'A matching service is not duplicated among related services');
+    interactiveServices.selectService('1');
+    assert.equal(detailRequests, 0, 'Hierarchy navigation uses preloaded data without fetching');
+    interactiveServices.filterServices('  database  ');
+    assert(!serviceCards.get('1').hidden && serviceCards.get('2').hidden);
+    interactiveServices.filterServices('applications');
+    assert(serviceCards.get('1').hidden && !serviceCards.get('2').hidden, 'Search includes hierarchy names');
+    interactiveServices.filterServices('missing'); assert(!emptySearch.hidden);
+    interactiveServices.filterServices(''); assert(emptySearch.hidden);
+    let detail = interactiveServices.selectService('1', true);
+    assert.equal(interactiveServices.selectService('1', true), detail, 'Repeated service refreshes reuse the pending request');
+    assert.equal(detailRequests, 1);
+    assert(serviceCards.get('1').open && serviceCards.get('1').button.disabled);
+    detailResolve({success: true, data: {serviceid: '1', status: 2, has_sla: false}}); await detail;
+    assert.equal(serviceCards.get('1').feedback.textContent, 'Service updated');
+    assert.equal(serviceCards.get('1').status.textContent, 'Warning');
+    assert(!serviceCards.get('1').button.disabled);
+    detail = interactiveServices.selectService('1', true);
+    detailResolve({success: false, error: {message: 'Refresh denied'}}); await detail;
+    assert.equal(serviceCards.get('1').feedback.textContent, 'Refresh denied', 'Refresh errors are visible');
+    assert(!serviceCards.get('1').button.disabled);
     for (const [value, label] of Object.entries(config.statusLabels)) {
         assert.equal(serviceUi.getServiceStatusText(Number(value)), label);
     }
-    assert.equal(serviceUi.getServiceStatusClass(0), 'status-not-classified');
-    assert.equal(serviceUi.getServiceStatusClass(2), 'status-warning');
-    assert.equal(serviceUi.getServiceStatusClass(3), 'status-average');
+    assert.equal(serviceUi.getServiceStatusClass(0), 'status-na-bg');
+    assert.equal(serviceUi.getServiceStatusClass(2), 'status-warning-bg');
+    assert.equal(serviceUi.getServiceStatusClass(3), 'status-average-bg');
 
     // Exercise the actual aggregation and last-week functions without browser timezone conversions.
     const pattern = {d: {eventSlots: {100: {hour: 23, weekday: 1, month: '2026-03', day: 30},

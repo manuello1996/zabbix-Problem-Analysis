@@ -21,7 +21,7 @@ This module provides a historical analysis of specific problems in Zabbix, offer
 - **Time Patterns**: Extended section with interactive filter bar, incident heatmap (day x hour), and monthly drilldown (last 12 months). Hourly and weekly charts are shown below this section as collapsible panels (collapsed by default).
 - **Graphs**: Consolidated charts for fixed windows (1 hour before incident to incident, and incident to now).
 - **Update**: Full action history including acknowledgements, comments, suppress/unsuppress, severity changes, and recovery/manual-close entries.
-- **Services**: Loads impacted services by matching event tags to service problem_tags and renders a service tree with a summary or a "no services" explanation.
+- **Services**: Searchable, expandable cards for every service matching the event's tags. Each card shows current status, SLA configuration, target comparisons, its hierarchy path, and the tag rules that matched. Refresh all services or an individual service with visible feedback. Ancestors are labelled as hierarchy context.
 
 ## **Module Functionality**
 - **Problem analysis popup**: Adds a dedicated event details popup with tabs for host context, timelines, patterns, graphs, updates, and impacted services.

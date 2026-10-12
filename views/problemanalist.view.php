@@ -945,7 +945,7 @@ $panels['update'] = $update_div;
 
 
 // TAB 7: Services
-$services_div = new CDiv();
+$services_div = (new CDiv())->addClass('services-container');
 
 // Loading indicator
 $loading_div = new CDiv(_('Loading services...'));
@@ -1006,7 +1006,22 @@ $popup_config = [
         'unavailable' => _('SLI unavailable'), 'disabled' => _('SLI unavailable (SLA disabled)'),
         'sla' => _('SLA'), 'target' => _('Target'), 'sli' => _('SLI'),
         'uptime' => _('Uptime'), 'downtime' => _('Downtime'), 'budget' => _('Error budget'),
+        'met' => _('Target met'), 'below' => _('Below target'),
         'period' => _('Reporting period (UTC)')
+    ],
+    'serviceLabels' => [
+        'matching' => _('Matching services'), 'matched' => _('Matches event tags'),
+        'slas' => _('SLAs'),
+        'current' => _('Service status and SLA values show current data, not the state at the event time.'),
+        'search' => _('Search services'), 'refresh' => _('Refresh services'),
+        'refreshService' => _('Refresh service'), 'refreshing' => _('Refreshing service…'),
+        'refreshed' => _('Service updated'), 'hierarchy' => _('Hierarchy path'),
+        'details' => _('Service details'), 'rules' => _('Matching tag rules'), 'equals' => _('equals'), 'contains' => _('contains'),
+        'tag' => _('Tag'), 'operator' => _('Operator'), 'value' => _('Value'),
+        'related' => _('Related services'), 'context' => _('Hierarchy context'),
+        'empty' => _('No services match this search.'), 'none' => _('No matching services found for this event.'),
+        'explanation' => _('No accessible service has problem-tag rules matching all required event tags.'),
+        'containsOperator' => ZBX_SERVICE_PROBLEM_TAG_OPERATOR_LIKE
     ],
     'eventData' => [
         'eventid' => $event['eventid'],
@@ -1015,6 +1030,15 @@ $popup_config = [
         'triggerid' => $trigger['triggerid'] ?? '',
         'problem_name' => $event['name'],
         'severity' => $event['severity']
+    ],
+    'statusStyles' => [
+        ZBX_SEVERITY_OK => ZBX_STYLE_STATUS_GREEN,
+        TRIGGER_SEVERITY_NOT_CLASSIFIED => CSeverityHelper::getStatusStyle(TRIGGER_SEVERITY_NOT_CLASSIFIED),
+        TRIGGER_SEVERITY_INFORMATION => CSeverityHelper::getStatusStyle(TRIGGER_SEVERITY_INFORMATION),
+        TRIGGER_SEVERITY_WARNING => CSeverityHelper::getStatusStyle(TRIGGER_SEVERITY_WARNING),
+        TRIGGER_SEVERITY_AVERAGE => CSeverityHelper::getStatusStyle(TRIGGER_SEVERITY_AVERAGE),
+        TRIGGER_SEVERITY_HIGH => CSeverityHelper::getStatusStyle(TRIGGER_SEVERITY_HIGH),
+        TRIGGER_SEVERITY_DISASTER => CSeverityHelper::getStatusStyle(TRIGGER_SEVERITY_DISASTER)
     ],
     'statusLabels' => [
         ZBX_SEVERITY_OK => _('OK'),
