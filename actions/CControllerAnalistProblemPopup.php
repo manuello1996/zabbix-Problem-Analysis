@@ -13,6 +13,7 @@ use CArrayHelper;
 use CMacrosResolverHelper;
 use CSettingsHelper;
 use CSeverityHelper;
+use CRoleHelper;
 use Manager;
 
 /**
@@ -27,6 +28,7 @@ class CControllerAnalistProblemPopup extends CController {
     protected function checkInput(): bool {
         $fields = [
             'eventid'       => 'required|id',
+            'tab'           => 'string|in overview,host,timeline,patterns,graphs,update',
             'triggerid'     => 'id',
             'hostid'        => 'id',
             'hostname'      => 'string',
@@ -58,6 +60,7 @@ class CControllerAnalistProblemPopup extends CController {
     protected function doAction(): void {
         $eventid = $this->getInput('eventid');
         $hostid = $this->getInput('hostid', 0);
+        $tab = $this->getInput('tab', 'overview');
 
 
 
@@ -68,9 +71,9 @@ class CControllerAnalistProblemPopup extends CController {
             ],
             'eventids' => $eventid,
             'selectTags' => ['tag', 'value'],
-            'selectAcknowledges' => ['acknowledgeid', 'clock', 'userid', 'message', 'action',
+            'selectAcknowledges' => $tab === 'update' ? ['acknowledgeid', 'clock', 'userid', 'message', 'action',
                 'old_severity', 'new_severity', 'suppress_until'
-            ]
+            ] : null
         ]);
 
         $event = $events ? $events[0] : [];
@@ -116,17 +119,41 @@ class CControllerAnalistProblemPopup extends CController {
         $trigger = null;
         $actual_triggerid = $event['objectid'];
 
-        if ($actual_triggerid > 0) {
+        if ($actual_triggerid > 0 && in_array($tab, ['overview', 'host', 'timeline', 'graphs'], true)) {
             $triggers = API::Trigger()->get([
                 'output' => ['triggerid', 'description', 'expression', 'comments', 'priority', 'opdata', 'manual_close',
                     'recovery_mode', 'recovery_expression', 'type', 'status'
                 ],
                 'triggerids' => $actual_triggerid,
                 'selectHosts' => ['hostid', 'host', 'name'],
-                'selectItems' => ['itemid', 'hostid', 'name', 'key_'], // This will get all items with itemid
+                'selectItems' => in_array($tab, ['overview', 'graphs'], true)
+                    ? ['itemid', 'hostid', 'name', 'key_'] : null,
                 'expandExpression' => true
             ]);
             $trigger = $triggers ? $triggers[0] : null;
+        }
+
+        $can_acknowledge = $tab === 'overview' && $this->checkAccess(CRoleHelper::ACTIONS_ACKNOWLEDGE_PROBLEMS);
+        $can_close = false;
+        if ($tab === 'overview' && !$recovery_eventid && $trigger
+                && (int) ($trigger['manual_close'] ?? 0) === ZBX_TRIGGER_MANUAL_CLOSE_ALLOWED
+                && $this->checkAccess(CRoleHelper::ACTIONS_CLOSE_PROBLEMS)) {
+            // Manual closure requires a writable trigger and no pending close action, as in the native popup.
+            $editable_triggers = API::Trigger()->get([
+                'output' => ['triggerid'], 'triggerids' => $actual_triggerid, 'editable' => true
+            ]);
+            if ($editable_triggers) {
+                $close_events = API::Event()->get([
+                    'output' => ['eventid'], 'eventids' => $eventid, 'selectAcknowledges' => ['action']
+                ]);
+                $can_close = !empty($close_events);
+                foreach ($close_events[0]['acknowledges'] ?? [] as $acknowledge) {
+                    if (((int) $acknowledge['action'] & ZBX_PROBLEM_UPDATE_CLOSE) !== 0) {
+                        $can_close = false;
+                        break;
+                    }
+                }
+            }
         }
 
         // Get host details with comprehensive data for hostcard
@@ -147,12 +174,22 @@ class CControllerAnalistProblemPopup extends CController {
         }
 
         if ($actual_hostid > 0) {
-            $host = $this->getHostCardData($actual_hostid);
+            if ($tab === 'host') {
+                $host = $this->getHostCardData($actual_hostid);
+            }
+            else {
+                foreach ($trigger['hosts'] as $trigger_host) {
+                    if ((string) $trigger_host['hostid'] === (string) $actual_hostid) {
+                        $host = $trigger_host;
+                        break;
+                    }
+                }
+            }
         }
 
         // Get problem events for Time Patterns.
         $pattern_events = [];
-        if ($actual_triggerid > 0) {
+        if ($tab === 'patterns' && $actual_triggerid > 0) {
             // Get problem events from the last 12 months for Time Patterns/Heatmap.
             $pattern_time_till = isset($event['clock']) ? (int)$event['clock'] : time();
             $pattern_time_from = strtotime('-11 months', strtotime(date('Y-m-01 00:00:00', $pattern_time_till)));
@@ -168,13 +205,19 @@ class CControllerAnalistProblemPopup extends CController {
                 'sortfield' => 'clock',
                 'sortorder' => 'DESC'
             ]);
+            if ($pattern_events === false) {
+                $this->setResponse((new CControllerResponseData(['main_block' => json_encode([
+                    'error' => ['messages' => [_('Unable to load time patterns.')]]
+                ])]))->disableView());
+                return;
+            }
         }
 
         // Get items for graphs - usar itemids do selectItems diretamente
         $items = [];
         $trigger_items = [];
 
-        if ($trigger && $actual_triggerid > 0) {
+        if ($trigger && $actual_triggerid > 0 && in_array($tab, ['overview', 'graphs'], true)) {
             if (isset($trigger['items']) && !empty($trigger['items'])) {
                 // Get itemids from selectItems and ensure uniqueness
                 $trigger_itemids = array_column($trigger['items'], 'itemid');
@@ -204,7 +247,7 @@ class CControllerAnalistProblemPopup extends CController {
         // Get monthly comparison data (last 6 months)
         $monthly_comparison = [];
 
-        if ($actual_triggerid > 0 && isset($event['clock'])) {
+        if ($tab === 'timeline' && $actual_triggerid > 0 && isset($event['clock'])) {
             $event_timestamp = (int)$event['clock'];
 
             // Base at the first day of the event's month 00:00:00
@@ -235,6 +278,12 @@ class CControllerAnalistProblemPopup extends CController {
                 'time_till' => $months[0]['end'],
                 'value'     => 1
             ]);
+            if ($comparison_events === false) {
+                $this->setResponse((new CControllerResponseData(['main_block' => json_encode([
+                    'error' => ['messages' => [_('Unable to load monthly comparison.')]]
+                ])]))->disableView());
+                return;
+            }
 
             foreach ($comparison_events as $comparison_event) {
                 $clock = (int) $comparison_event['clock'];
@@ -278,10 +327,16 @@ class CControllerAnalistProblemPopup extends CController {
         // Get monthly comparison data
 
 
-        $operational_data = $this->getOperationalData($trigger, $event, $trigger_items);
+        $operational_data = $tab === 'overview'
+            ? $this->getOperationalData($trigger, $event, $trigger_items)
+            : ['value' => '', 'history' => []];
 
         // Prepare data for view
         $data = [
+            'tab' => $tab,
+            'is_fragment' => $this->getAction() === 'problemanalist.tab.get',
+            'can_acknowledge' => $can_acknowledge,
+            'can_close' => $can_close,
             'event' => $event,
             'trigger' => $trigger,
             'host' => $host,

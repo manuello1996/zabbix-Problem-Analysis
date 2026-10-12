@@ -4,6 +4,7 @@ if (PHP_SAPI !== 'cli') { http_response_code(404); exit; }
 $ui_root = getenv('ZABBIX_UI_ROOT') ?: dirname(__DIR__, 3);
 require $ui_root.'/include/defines.inc.php';
 require $ui_root.'/include/classes/helpers/CArrayHelper.php';
+require $ui_root.'/include/classes/helpers/CRoleHelper.php';
 require $ui_root.'/include/actions.inc.php';
 require $ui_root.'/include/hosts.inc.php';
 
@@ -18,12 +19,14 @@ function check($condition, $message) {
 }
 class CController {
     public $response;
+    public static $denied = [];
     protected $input;
     public function __construct(array $input = []) { $this->input = $input; }
     protected function getInput($name, $default = null) { return $this->input[$name] ?? $default; }
     protected function setResponse($response) { $this->response = $response; }
     protected function getDebugMode() { return false; }
-    protected function checkAccess($permission) { return true; }
+    protected function checkAccess($permission) { return !in_array($permission, self::$denied, true); }
+    public function getAction() { return isset($this->input['tab']) ? 'problemanalist.tab.get' : 'problemanalist.view'; }
 }
 class CControllerResponseData {
     private $data;
@@ -39,7 +42,7 @@ class ApiFixture {
         API::$calls[] = [$this->kind, $options];
         switch ($this->kind) {
             case 'event':
-                if (!isset($options['eventids'])) return [];
+                if (!isset($options['eventids'])) return API::$history;
                 $event = API::$event;
                 if (!$event) return [];
                 if (isset($options['selectAcknowledges'])) {
@@ -47,8 +50,9 @@ class ApiFixture {
                         return array_intersect_key($ack, array_flip($options['selectAcknowledges']));
                     }, $event['acknowledges']);
                 }
+                if (!isset($options['selectAcknowledges'])) unset($event['acknowledges']);
                 return [$event];
-            case 'trigger': return API::$trigger ? [API::$trigger] : [];
+            case 'trigger': return API::$trigger && (empty($options['editable']) || API::$editable) ? [API::$trigger] : [];
             case 'host': throw new HostSelectionProbe((string) $options['hostids']);
             case 'service':
                 if (API::$services === false) return false;
@@ -65,8 +69,10 @@ class ApiFixture {
 class API {
     public static $event = [];
     public static $trigger = null;
+    public static $editable = true;
     public static $services = [];
     public static $calls = [];
+    public static $history = [];
     public static function Event() { return new ApiFixture('event'); }
     public static function Trigger() { return new ApiFixture('trigger'); }
     public static function Host() { return new ApiFixture('host'); }
@@ -135,10 +141,30 @@ API::$calls = [];
 $controller = new ProblemControllerFixture(['eventid' => '1', 'triggerid' => '99', 'hostid' => '88']);
 $controller->run();
 $data = $controller->response->getData();
-check($data['event']['acknowledges'][0] === $ack, 'Controller must request complete acknowledgement records');
+check(!isset($data['event']['acknowledges']), 'Overview must skip acknowledgement history');
+check(count(API::$calls) === 2, 'Overview must only request event and trigger when no items exist');
 $trigger_calls = array_values(array_filter(API::$calls, static function ($call) { return $call[0] === 'trigger'; }));
 check($trigger_calls[0][1]['triggerids'] === '7', 'Event trigger must override a conflicting request hint');
 check($data['host'] === null, 'An unrelated requested host must not be loaded');
+$update = new ProblemControllerFixture(['eventid' => '1', 'tab' => 'update']);
+API::$calls = [];
+$update->run();
+$data = $update->response->getData();
+check($data['event']['acknowledges'][0] === $ack, 'Update must request complete acknowledgements');
+check(count(API::$calls) === 1, 'Update must skip trigger, host and range queries');
+foreach (['patterns', 'timeline'] as $tab) {
+    API::$calls = [];
+    (new ProblemControllerFixture(['eventid' => '1', 'tab' => $tab]))->run();
+    $ranges = array_filter(API::$calls, static function ($call) {
+        return $call[0] === 'event' && isset($call[1]['time_from']);
+    });
+    check(count($ranges) === 1, 'Each historical tab must request only its own range');
+    API::$history = false;
+    $failed = new ProblemControllerFixture(['eventid' => '1', 'tab' => $tab]);
+    $failed->run();
+    check(isset(json_decode($failed->response->getData()['main_block'], true)['error']), 'Range failures must remain retryable errors');
+    API::$history = [];
+}
 $history_event = $data['event'];
 $history_event['r_eventid'] = '2';
 $recovery_alert = ['eventid' => '2', 'clock' => 121, 'alerttype' => ALERT_TYPE_MESSAGE,
@@ -158,10 +184,34 @@ $alerts = array_filter($actions['actions'], static function ($action) {
 });
 check(count($alerts) === 1, 'Native collector emits one recovery notification');
 
+API::$trigger = ['triggerid' => '7', 'manual_close' => ZBX_TRIGGER_MANUAL_CLOSE_ALLOWED, 'hosts' => []];
+$overview = static function () {
+    $controller = new ProblemControllerFixture(['eventid' => '1']);
+    $controller->run();
+    return $controller->response->getData();
+};
+$data = $overview();
+check($data['can_acknowledge'] && $data['can_close'], 'Permitted writable open problems expose both actions');
+API::$editable = false;
+check(!$overview()['can_close'], 'Read-only triggers cannot be manually closed');
+API::$editable = true;
+CController::$denied = [CRoleHelper::ACTIONS_ACKNOWLEDGE_PROBLEMS, CRoleHelper::ACTIONS_CLOSE_PROBLEMS];
+$data = $overview();
+check(!$data['can_acknowledge'] && !$data['can_close'], 'Role restrictions hide both controls');
+CController::$denied = [];
+API::$event['acknowledges'][] = ['action' => ZBX_PROBLEM_UPDATE_CLOSE];
+check(!$overview()['can_close'], 'Pending closure must hide the close control');
+API::$event['acknowledges'] = [$ack];
+API::$event['r_eventid'] = '2';
+check(!$overview()['can_close'], 'Resolved problems cannot be manually closed');
+API::$event['r_eventid'] = '0';
+API::$trigger['manual_close'] = ZBX_TRIGGER_MANUAL_CLOSE_NOT_ALLOWED;
+check(!$overview()['can_close'], 'Trigger manual-close setting must be respected');
+
 API::$trigger = ['triggerid' => '7', 'hosts' => [['hostid' => '11'], ['hostid' => '12']]];
 foreach (['88' => '11', '12' => '12'] as $requested => $expected) {
     try {
-        (new ProblemControllerFixture(['eventid' => '1', 'hostid' => (string) $requested]))->run();
+        (new ProblemControllerFixture(['eventid' => '1', 'tab' => 'host', 'hostid' => (string) $requested]))->run();
         throw new RuntimeException('Expected host selection probe');
     } catch (HostSelectionProbe $probe) {
         check($probe->getMessage() === $expected, 'Host selection must stay within event trigger hosts');

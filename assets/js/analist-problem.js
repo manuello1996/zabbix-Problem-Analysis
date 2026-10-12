@@ -1,99 +1,51 @@
 document.addEventListener('DOMContentLoaded', () => {
     class AnalistProblem {
         constructor() {
-            this.CSRF_TOKEN_NAME = '_csrf_token';
-            this.form = this.findFormWithCsrfToken();
+            this.pendingUpdate = null;
+            this.events = new AbortController();
+            this.observer = new MutationObserver(records => {
+                window.AnalistProblemPopup?.cleanupDetached();
+                const selector = '.flickerfreescreen, .dashboard-widget-problems';
+                const relevant = records.some(record => {
+                    if (record.target instanceof Element && record.target.closest(selector)) return true;
+                    return [...record.addedNodes, ...record.removedNodes].some(node =>
+                        node instanceof Element && (node.matches(selector) || node.querySelector(selector)));
+                });
+                if (relevant) this.scheduleUpdate();
+            });
             this.init();
         }
 
-        findFormWithCsrfToken() {
-            for (let form of document.forms) {
-                if (form[this.CSRF_TOKEN_NAME]) {
-                    return form;
+        init() {
+            this.addLTSButton();
+            this.observer.observe(document.body, {childList: true, subtree: true});
+            document.addEventListener('zbx_reload', () => this.scheduleUpdate(), {signal: this.events.signal});
+            window.addEventListener('pagehide', () => this.suspend(), {signal: this.events.signal});
+            window.addEventListener('pageshow', event => {
+                if (event.persisted) {
+                    this.observer.observe(document.body, {childList: true, subtree: true});
+                    this.scheduleUpdate();
                 }
-            }
-
-            const tokenInput = document.querySelector(`input[name="${this.CSRF_TOKEN_NAME}"]`);
-            if (tokenInput) {
-                return tokenInput.closest('form') || document.forms[0];
-            }
-
-            return document.forms[0];
+            }, {signal: this.events.signal});
         }
 
-        init() {
-            // Adiciona o botão inicialmente
-            this.addLTSButton();
-
-            // Observer para mudanças no DOM
-            const observer = new MutationObserver((mutations) => {
-                mutations.forEach((mutation) => {
-                    // Verifica se há mudanças relevantes para o botão LTS
-                    if (mutation.target.classList &&
-                        (mutation.target.classList.contains('flickerfreescreen') ||
-                         mutation.target.classList.contains('list-table') ||
-                         mutation.target.classList.contains('dashboard-grid-widget-contents') ||
-                         mutation.target.classList.contains('dashboard-widget-problems') ||
-                         mutation.target.classList.contains('table') ||
-                         mutation.target.tagName === 'TBODY' ||
-                         mutation.target.tagName === 'TR')) {
-                        this.addLTSButton();
-                    }
-                });
-            });
-
-            // Observer específico para widgets da dashboard
-            const dashboardObserver = new MutationObserver((mutations) => {
-                let shouldUpdate = false;
-                mutations.forEach((mutation) => {
-                    if (mutation.target.classList &&
-                        (mutation.target.classList.contains('dashboard-grid-widget-contents') ||
-                         mutation.target.classList.contains('dashboard-widget-problems') ||
-                         mutation.target.closest('.dashboard-grid-widget-contents'))) {
-                        shouldUpdate = true;
-                    }
-                });
-
-                if (shouldUpdate) {
-                    setTimeout(() => {
-                        this.addLTSButtonToDashboardWidgets();
-                    }, 500);
-                }
-            });
-
-            // Observar especificamente o dashboard se existir
-            const dashboardContainer = document.querySelector('.dashboard-grid, .dashboard-container');
-            if (dashboardContainer) {
-                dashboardObserver.observe(dashboardContainer, {
-                    childList: true,
-                    subtree: true,
-                    attributes: true,
-                    attributeFilter: ['class']
-                });
-            }
-
-            // Observa o corpo do documento para mudanças
-            observer.observe(document.body, {
-                childList: true,
-                subtree: true,
-                attributes: true,
-                attributeFilter: ['class', 'style']
-            });
-
-            // Adiciona listener para o evento específico do Zabbix de atualização da tela
-            document.addEventListener('zbx_reload', () => {
+        scheduleUpdate() {
+            clearTimeout(this.pendingUpdate);
+            this.pendingUpdate = setTimeout(() => {
+                this.pendingUpdate = null;
                 this.addLTSButton();
-            });
+            }, 80);
+        }
 
-            // Executa periodicamente para capturar mudanças dinâmicas
-            setInterval(() => {
-                this.addLTSButton();
-            }, 2000);
+        suspend() {
+            clearTimeout(this.pendingUpdate);
+            this.pendingUpdate = null;
+            this.observer.disconnect();
+        }
 
-            // Executa periodicamente para capturar widgets da dashboard carregados dinamicamente
-            setInterval(() => {
-                this.addLTSButtonToDashboardWidgets();
-            }, 3000);
+        destroy() {
+            this.suspend();
+            this.events.abort();
         }
 
         addLTSButton() {
@@ -443,14 +395,7 @@ document.addEventListener('DOMContentLoaded', () => {
             }
         }
 
-        getCsrfToken() {
-            if (this.form && this.form[this.CSRF_TOKEN_NAME]) {
-                return this.form[this.CSRF_TOKEN_NAME].value;
-            }
 
-            const tokenInput = document.querySelector(`input[name="${this.CSRF_TOKEN_NAME}"]`);
-            return tokenInput ? tokenInput.value : '';
-        }
     }
 
     // Inicializa a classe

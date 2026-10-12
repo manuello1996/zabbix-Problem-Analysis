@@ -1,5 +1,5 @@
 {
-    "manifest_version": 2.0,
+    "manifest_version": 2,
     "id": "analistproblem",
     "name": "Analist-Problem",
     "version": "7.2",
@@ -15,10 +15,21 @@
         "problemanalist.service.get": {
             "class": "CControllerAnalistServicePopup",
             "layout": "layout.json"
+        },
+        "problemanalist.tab.get": {
+            "class": "CControllerAnalistProblemPopup",
+            "view": "problemanalist.view",
+            "layout": "layout.widget"
         }
     },
     "assets": {
-        "js": ["analist-problem.js"],
-        "css": ["dark-theme.css", "blue-theme.css"]
+        "js": [
+            "analist-popup.js",
+            "analist-problem.js"
+        ],
+        "css": [
+            "dark-theme.css",
+            "blue-theme.css"
+        ]
     }
 }

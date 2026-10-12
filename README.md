@@ -16,7 +16,7 @@ This module provides a historical analysis of specific problems in Zabbix, offer
 
 ## **Popup Tabs**
 - **Host Info**: Host description plus monitoring/availability stats, host groups, monitored-by info, tags, templates, and inventory (when available).
-- **Overview**: Event summary table (ID, name, host, severity, time, status, trigger details) and optional agent metrics.
+- **Overview**: Event summary table and optional agent metrics. Users with acknowledgement permission can acknowledge/unacknowledge the selected event. A Close problem row appears only for permitted, writable, manually closable problems that are unresolved and have no pending close action. Updates use Zabbix's native CSRF-protected endpoint, refresh Overview, and invalidate cached history.
 - **Timeline**: Monthly incident comparison (last 6 months when available) and Zabbix event list for the previous 20 occurrences with native actions (acknowledge, severity change, close, etc.).
 - **Time Patterns**: Extended section with interactive filter bar, incident heatmap (day x hour), and monthly drilldown (last 12 months). Hourly and weekly charts are shown below this section as collapsible panels (collapsed by default).
 - **Graphs**: Consolidated charts for fixed windows (1 hour before incident to incident, and incident to now).
@@ -25,6 +25,8 @@ This module provides a historical analysis of specific problems in Zabbix, offer
 
 ## **Module Functionality**
 - **Problem analysis popup**: Adds a dedicated event details popup with tabs for host context, timelines, patterns, graphs, updates, and impacted services.
+- **On-demand tabs**: Overview renders immediately. Host Info, Timeline, Time Patterns, Graphs, Update, and Services load on their first visit and stay cached for that popup. Failed loads show a Retry button. Monthly Comparison appears only in Timeline.
+- **Popup lifecycle**: Each popup owns its tab state and requests. Closing or removing it cancels pending requests and removes its handlers. Problem-table refreshes use one debounced observer.
 - **Historical comparison**: Builds monthly incident comparisons for the same problem (last 6 months when available).
 - **Pattern detection**: Aggregates related events to show hourly/weekday distributions, interactive heatmap filtering, and monthly/day drilldowns.
 - **Time format behavior**: All pattern charts and filters use the Zabbix frontend/user timezone. The 12-month window includes the event month and the preceding 11 calendar months; last-week comparisons use the calendar week preceding the selected event's week.

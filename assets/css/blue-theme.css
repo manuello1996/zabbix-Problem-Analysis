@@ -44,6 +44,11 @@
     display: grid !important;
 }
 
+.event-details-popup .chart-image {
+    max-width: 100%;
+    height: auto;
+}
+
 .chart-items-list ul {
     list-style: disclosure-closed;
     margin-left: 20px;
