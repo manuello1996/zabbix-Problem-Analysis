@@ -227,7 +227,7 @@ $controller = new ProblemControllerFixture(['eventid' => '1', 'triggerid' => '99
 $controller->run();
 $data = $controller->response->getData();
 check(!isset($data['event']['acknowledges']), 'Overview must skip acknowledgement history');
-check(count(API::$calls) === 2, 'Overview must only request event and trigger when no items exist');
+check(count(API::$calls) === 2, 'Overview skips writable permission queries when the trigger is unavailable');
 $trigger_calls = array_values(array_filter(API::$calls, static function ($call) { return $call[0] === 'trigger'; }));
 check($trigger_calls[0][1]['triggerids'] === '7', 'Event trigger must override a conflicting request hint');
 check($data['host'] === null, 'An unrelated requested host must not be loaded');
@@ -276,13 +276,14 @@ $overview = static function () {
     return $controller->response->getData();
 };
 $data = $overview();
-check($data['can_acknowledge'] && $data['can_close'], 'Permitted writable open problems expose both actions');
+check($data['can_acknowledge'] && $data['can_close'] && $data['can_change_severity'], 'Permitted writable problems expose acknowledgement, close and severity actions');
 API::$editable = false;
-check(!$overview()['can_close'], 'Read-only triggers cannot be manually closed');
+$readonly = $overview();
+check(!$readonly['can_close'] && !$readonly['can_change_severity'], 'Read-only triggers cannot close or change severity');
 API::$editable = true;
-CController::$denied = [CRoleHelper::ACTIONS_ACKNOWLEDGE_PROBLEMS, CRoleHelper::ACTIONS_CLOSE_PROBLEMS];
+CController::$denied = [CRoleHelper::ACTIONS_ACKNOWLEDGE_PROBLEMS, CRoleHelper::ACTIONS_CLOSE_PROBLEMS, CRoleHelper::ACTIONS_CHANGE_SEVERITY];
 $data = $overview();
-check(!$data['can_acknowledge'] && !$data['can_close'], 'Role restrictions hide both controls');
+check(!$data['can_acknowledge'] && !$data['can_close'] && !$data['can_change_severity'], 'Role restrictions hide both controls');
 CController::$denied = [];
 API::$event['acknowledges'][] = ['action' => ZBX_PROBLEM_UPDATE_CLOSE];
 $closing = $overview();

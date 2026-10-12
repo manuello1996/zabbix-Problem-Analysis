@@ -969,11 +969,19 @@
             const fields = {
                 acknowledge: ['acknowledge_problem', actions.acknowledgeAction],
                 unacknowledge: ['unacknowledge_problem', actions.unacknowledgeAction],
-                close: ['close_problem', actions.closeAction]
+                close: ['close_problem', actions.closeAction],
+                'severity-up': ['change_severity', actions.severityAction],
+                'severity-down': ['change_severity', actions.severityAction]
             };
-            if (!fields[action] || !(action === 'close' ? actions.canClose : actions.canAcknowledge)) return;
+            const changingSeverity = action === 'severity-up' || action === 'severity-down';
+            if (!fields[action] || !(changingSeverity ? actions.canChangeSeverity
+                    : action === 'close' ? actions.canClose : actions.canAcknowledge)) return;
+            const nextSeverity = Number(actions.severity) + (action === 'severity-up' ? 1 : -1);
+            if (changingSeverity && (!Number.isInteger(nextSeverity)
+                    || nextSeverity < actions.minSeverity || nextSeverity > actions.maxSeverity)) return;
             this.updatingProblem = true;
             const buttons = Array.from(this.root.querySelectorAll('[data-problem-action]'));
+            const disabledStates = buttons.map(button => button.disabled);
             buttons.forEach(button => { button.disabled = true; });
             const message = this.root.querySelector('[data-problem-action-message]');
             if (message) message.textContent = '';
@@ -984,7 +992,8 @@
                     'eventids[]': this.config.eventData.eventid,
                     scope: actions.selectedScope,
                     [actions.csrfTokenName]: actions.csrfToken,
-                    [field]: value
+                    [field]: value,
+                    ...(changingSeverity ? {severity: nextSeverity} : {})
                 });
                 if (!result.success) throw new Error('Unable to update event');
                 updated = true;
@@ -1012,7 +1021,7 @@
                 if (!this.closed && error.name !== 'AbortError' && message) message.textContent = error.message;
             } finally {
                 this.updatingProblem = false;
-                if (!updated && !this.closed) buttons.forEach(button => { button.disabled = false; });
+                if (!updated && !this.closed) buttons.forEach((button, index) => { button.disabled = disabledStates[index]; });
             }
         }
 

@@ -1060,3 +1060,18 @@ td:has(.js-lts-button-widget) {
 .event-details-popup .analist-related-services > summary:focus-visible {
     outline: 2px solid var(--analist-service-accent);
 }
+
+.event-details-popup .analist-severity-control {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+}
+.event-details-popup .analist-severity-arrows {
+    display: inline-flex;
+    align-items: center;
+    gap: 2px;
+}
+.event-details-popup .analist-severity-arrows .btn-icon {
+    color: inherit;
+}

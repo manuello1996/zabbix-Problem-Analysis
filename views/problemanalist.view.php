@@ -55,6 +55,11 @@ $is_acknowledged = (int) ($event['acknowledged'] ?? EVENT_NOT_ACKNOWLEDGED) === 
 $problem_actions = [
     'canAcknowledge' => (bool) ($data['can_acknowledge'] ?? false),
     'canClose' => (bool) ($data['can_close'] ?? false),
+    'canChangeSeverity' => (bool) ($data['can_change_severity'] ?? false),
+    'severity' => $severity,
+    'minSeverity' => TRIGGER_SEVERITY_NOT_CLASSIFIED,
+    'maxSeverity' => TRIGGER_SEVERITY_COUNT - 1,
+    'severityAction' => ZBX_PROBLEM_UPDATE_SEVERITY,
     'acknowledged' => $is_acknowledged,
     'recoveryReady' => $is_resolved && isset($event['recovery_clock']),
     'closingPending' => $closing_pending,
@@ -66,7 +71,7 @@ $problem_actions = [
     ]))->setAttribute('data-recovery-row', '')->toString(),
     'closingLabel' => _('Closing problem. Waiting for recovery time…'),
     'csrfTokenName' => CSRF_TOKEN_NAME,
-    'csrfToken' => !empty($data['can_acknowledge']) || !empty($data['can_close'])
+    'csrfToken' => !empty($data['can_acknowledge']) || !empty($data['can_close']) || !empty($data['can_change_severity'])
         ? CCsrfTokenHelper::get('acknowledge') : '',
     'acknowledgeAction' => ZBX_PROBLEM_UPDATE_ACKNOWLEDGE,
     'unacknowledgeAction' => ZBX_PROBLEM_UPDATE_UNACKNOWLEDGE,
@@ -75,6 +80,23 @@ $problem_actions = [
     'updatedLabel' => _('Event updated'),
     'refreshErrorLabel' => _('Event updated, but the details could not be refreshed. Please retry.')
 ];
+$severity_value = CSeverityHelper::makeSeverityCell($severity);
+if ($problem_actions['canChangeSeverity']) {
+    $severity_controls = (new CDiv([
+        new CSpan(CSeverityHelper::getName($severity)),
+        (new CDiv([
+            (new CButtonIcon(ZBX_ICON_ARROW_UP_SMALL, _('Increase severity')))
+                ->setAttribute('aria-label', _('Increase severity'))
+                ->setAttribute('data-problem-action', 'severity-up')
+                ->setEnabled($severity < TRIGGER_SEVERITY_COUNT - 1),
+            (new CButtonIcon(ZBX_ICON_ARROW_DOWN_SMALL, _('Decrease severity')))
+                ->setAttribute('aria-label', _('Decrease severity'))
+                ->setAttribute('data-problem-action', 'severity-down')
+                ->setEnabled($severity > TRIGGER_SEVERITY_NOT_CLASSIFIED)
+        ]))->addClass('analist-severity-arrows')
+    ]))->addClass('analist-severity-control');
+    $severity_value = CSeverityHelper::makeSeverityCell($severity, $severity_controls);
+}
 $acknowledgement_value = (new CDiv([
     (new CIcon(
         $is_acknowledged ? ZBX_ICON_CHECK : ZBX_ICON_UNCHECK,
@@ -372,7 +394,7 @@ $problem_details_table->addRow([
 
 $problem_details_table->addRow([
     $details_label(_('Severity')),
-    CSeverityHelper::makeSeverityCell($severity),
+    $severity_value,
     $details_label(_('Acknowledged')),
     $details_value($acknowledgement_value)
 ]);

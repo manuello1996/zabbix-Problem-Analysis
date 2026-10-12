@@ -22,7 +22,7 @@ class CSeverityHelper {
         return [ZBX_STYLE_STATUS_NA_BG, ZBX_STYLE_STATUS_INFO_BG, ZBX_STYLE_STATUS_WARNING_BG,
             ZBX_STYLE_STATUS_AVERAGE_BG, ZBX_STYLE_STATUS_HIGH_BG, ZBX_STYLE_STATUS_DISASTER_BG][$severity] ?? null;
     }
-    public static function makeSeverityCell($severity) { return new CCol(self::getName($severity)); }
+    public static function makeSeverityCell($severity, $text = null) { return new CCol($text ?? self::getName($severity)); }
 }
 class CWebUser {
     public static $data = ['lang' => 'en_US'];
@@ -71,6 +71,7 @@ $response = (new ViewFixture())->render([
     'closing_pending' => $scenario === 'closing',
     'can_acknowledge' => in_array($scenario, ['permitted', 'acknowledged', 'ack-only']),
     'can_close' => in_array($scenario, ['permitted', 'acknowledged']),
+    'can_change_severity' => in_array($scenario, ['permitted', 'acknowledged']),
     'pattern_events' => [['clock' => strtotime('2026-03-30 00:30:00')]],
     'items' => [['itemid' => '1', 'name' => 'Fixture metric']],
     'monthly_comparison' => ['months' => [['name' => 'March 2026', 'count' => 1, 'change_percentage' => 0]]]

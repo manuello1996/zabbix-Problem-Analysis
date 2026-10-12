@@ -134,15 +134,24 @@ class CControllerAnalistProblemPopup extends CController {
         }
 
         $can_acknowledge = $tab === 'overview' && $this->checkAccess(CRoleHelper::ACTIONS_ACKNOWLEDGE_PROBLEMS);
+        $can_change_severity = false;
+        $editable_triggers = [];
+        if ($tab === 'overview' && $trigger
+                && ($this->checkAccess(CRoleHelper::ACTIONS_CHANGE_SEVERITY)
+                    || (!$recovery_eventid && (int) ($trigger['manual_close'] ?? 0) === ZBX_TRIGGER_MANUAL_CLOSE_ALLOWED
+                        && $this->checkAccess(CRoleHelper::ACTIONS_CLOSE_PROBLEMS)))) {
+            $editable_triggers = API::Trigger()->get([
+                'output' => ['triggerid'], 'triggerids' => $actual_triggerid, 'editable' => true
+            ]);
+            $can_change_severity = (bool) $editable_triggers
+                && $this->checkAccess(CRoleHelper::ACTIONS_CHANGE_SEVERITY);
+        }
         $can_close = false;
         $closing_pending = false;
         if ($tab === 'overview' && !$recovery_eventid && $trigger
                 && (int) ($trigger['manual_close'] ?? 0) === ZBX_TRIGGER_MANUAL_CLOSE_ALLOWED
                 && $this->checkAccess(CRoleHelper::ACTIONS_CLOSE_PROBLEMS)) {
             // Manual closure requires a writable trigger and no pending close action, as in the native popup.
-            $editable_triggers = API::Trigger()->get([
-                'output' => ['triggerid'], 'triggerids' => $actual_triggerid, 'editable' => true
-            ]);
             if ($editable_triggers) {
                 $close_events = API::Event()->get([
                     'output' => ['eventid'], 'eventids' => $eventid, 'selectAcknowledges' => ['action']
@@ -338,6 +347,7 @@ class CControllerAnalistProblemPopup extends CController {
             'tab' => $tab,
             'is_fragment' => $this->getAction() === 'problemanalist.tab.get',
             'can_acknowledge' => $can_acknowledge,
+            'can_change_severity' => $can_change_severity,
             'can_close' => $can_close,
             'closing_pending' => $closing_pending,
             'event' => $event,

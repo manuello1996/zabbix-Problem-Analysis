@@ -34,6 +34,9 @@ export async function runRegression(fixture, asset, popupAsset, fragments = {}, 
         assert.equal(rendered.response.body.includes('data-problem-action="acknowledge"'),
             ['permitted', 'ack-only'].includes(scenario));
         assert.equal(rendered.response.body.includes('data-problem-action="unacknowledge"'), scenario === 'acknowledged');
+        assert.equal(rendered.response.body.includes('data-problem-action="severity-up"'),
+            ['permitted', 'acknowledged'].includes(scenario), 'Severity controls require permission');
+
     }
     if (actionFixtures.fragment) {
         assert.equal(actionFixtures.fragment.inline, '', 'Overview refresh must return a fragment');
@@ -374,6 +377,32 @@ export async function runRegression(fixture, asset, popupAsset, fragments = {}, 
         }
         get cells() { return this.children.filter(child => ['TD', 'TH'].includes(child.tagName)); }
     }
+    const severityRoot = popupRoot(); roots.set('severity', severityRoot);
+    const severityActions = {...actions, canChangeSeverity: true, severity: 3};
+    const severityPopup = Popup.mount({...config, rootId: 'severity', problemActions: severityActions});
+    for (const [action, current, expected] of [['severity-up', 3, 4], ['severity-down', 3, 2]]) {
+        severityPopup.config.problemActions.severity = current;
+        const index = pending.length;
+        const change = severityPopup.updateProblem(action);
+        assert.equal(pending[index].options.body.get('change_severity'), String(actions.severityAction));
+        assert.equal(pending[index].options.body.get('severity'), String(expected));
+        assert.equal(pending[index].options.body.get('close_problem'), null);
+        pending[index].resolve({success: {title: 'Event updated'}});
+        while (pending.length < index + 2) await Promise.resolve();
+        pending[index + 1].resolve({body: 'Updated severity', problem_actions: {...severityActions, severity: expected}});
+        await change;
+        assert.equal(severityPopup.config.problemActions.severity, expected);
+    }
+    const severityRequestCount = pending.length;
+    severityPopup.config.problemActions.severity = severityActions.maxSeverity;
+    await severityPopup.updateProblem('severity-up');
+    severityPopup.config.problemActions.severity = severityActions.minSeverity;
+    await severityPopup.updateProblem('severity-down');
+    severityPopup.config.problemActions.canChangeSeverity = false;
+    await severityPopup.updateProblem('severity-up');
+    assert.equal(pending.length, severityRequestCount, 'Limits and permissions prevent severity requests');
+    severityRoot.dialogue.dispatch('dialogue.close');
+
     function tableFixture() {
         const header = new Element('tr');
         header.appendChild(new Element('th')); header.appendChild(new Element('th'));
