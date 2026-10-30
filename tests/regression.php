@@ -56,6 +56,19 @@ class ApiFixture {
                 if (!isset($options['selectAcknowledges'])) unset($event['acknowledges']);
                 return [$event];
             case 'trigger': return API::$trigger && (empty($options['editable']) || API::$editable) ? [API::$trigger] : [];
+            case 'item': return array_values(array_filter(API::$items, static function ($item) use ($options) {
+                return in_array((string) $item['itemid'], array_map('strval', $options['itemids']), true);
+            }));
+            case 'item_history':
+                if (API::$item_history === false) return false;
+                $rows = array_values(array_filter(API::$item_history, static function ($row) use ($options) {
+                    return in_array((string) $row['itemid'], array_map('strval', $options['itemids']), true)
+                        && (int) $row['clock'] <= $options['time_till'];
+                }));
+                usort($rows, static function ($a, $b) {
+                    return ($b['clock'] <=> $a['clock']) ?: ($b['ns'] <=> $a['ns']);
+                });
+                return array_slice($rows, 0, $options['limit']);
             case 'host': throw new HostSelectionProbe((string) $options['hostids']);
             case 'sla':
                 if (API::$slas instanceof Exception) throw API::$slas;
@@ -85,11 +98,15 @@ class API {
     public static $services = [];
     public static $calls = [];
     public static $history = [];
+    public static $items = [];
+    public static $item_history = [];
     public static $slas = [];
     public static $sli = [];
     public static function Event() { return new ApiFixture('event'); }
     public static function Trigger() { return new ApiFixture('trigger'); }
     public static function Host() { return new ApiFixture('host'); }
+    public static function Item() { return new ApiFixture('item'); }
+    public static function History() { return new ApiFixture('item_history'); }
     public static function Service() { return new ApiFixture('service'); }
     public static function Sla() { return new ApiFixture('sla'); }
 }
@@ -237,6 +254,14 @@ $update->run();
 $data = $update->response->getData();
 check($data['event']['acknowledges'][0] === $ack, 'Update must request complete acknowledgements');
 check(count(API::$calls) === 1, 'Update must skip trigger, host and range queries');
+check($data['can_comment'], 'Update exposes the permitted comment action without loading a trigger');
+CController::$denied = [CRoleHelper::ACTIONS_ADD_PROBLEM_COMMENTS];
+$update->run();
+check(!$update->response->getData()['can_comment'], 'Comment controls obey their own role permission');
+CController::$denied = [CRoleHelper::ACTIONS_ACKNOWLEDGE_PROBLEMS];
+$update->run();
+check($update->response->getData()['can_comment'], 'Adding comments does not require acknowledgement permission');
+CController::$denied = [];
 foreach (['patterns', 'timeline'] as $tab) {
     API::$calls = [];
     (new ProblemControllerFixture(['eventid' => '1', 'tab' => $tab]))->run();
@@ -311,6 +336,43 @@ API::$event['value'] = 0;
 $controller = new ProblemControllerFixture(['eventid' => '1']);
 $controller->run();
 check(isset(json_decode($controller->response->getData()['main_block'], true)['error']), 'Recovery events must not be analyzed as problems');
+
+API::$event['value'] = TRIGGER_VALUE_TRUE;
+API::$trigger = ['triggerid' => '7', 'items' => [['itemid' => '10']]];
+API::$items = [['itemid' => '10', 'name' => 'Example metric', 'value_type' => ITEM_VALUE_TYPE_UINT64]];
+API::$item_history = array_map(static function ($pair) {
+    return ['itemid' => '10', 'clock' => $pair[0], 'ns' => $pair[1], 'value' => '42'];
+}, [[100, 900], [100, 500], [100, 400], [100, 300], [100, 200], [100, 100], [99, 800], [99, 0], [98, 0]]);
+$more_history = static function ($clock, $ns, $itemid = '10') {
+    $controller = new ProblemControllerFixture(['eventid' => '1', 'tab' => 'history', 'itemid' => $itemid,
+        'before_clock' => $clock, 'before_ns' => $ns]);
+    $controller->run();
+    return $controller->response->getData();
+};
+API::$calls = [];
+$page = $more_history(100, 500);
+check(array_column($page['history_values'], 'ns') === [400, 300, 200], 'More loads exactly three older values, including within the same second');
+check($page['history_has_more'] && $page['history_cursor'] === ['clock' => 100, 'ns' => 200], 'Cursor points to the last returned value');
+$queries = array_values(array_filter(API::$calls, static function ($call) { return $call[0] === 'item_history'; }));
+check(count($queries) === 2 && $queries[0][1]['limit'] === 4, 'History reads one lookahead value and expands only at a shared timestamp');
+check($queries[0][1]['history'] === ITEM_VALUE_TYPE_UINT64 && $queries[0][1]['sortfield'] === ['clock', 'ns'], 'Use the server item type and stable timestamp ordering');
+$page = $more_history(100, 200);
+check(array_column($page['history_values'], 'clock') === [100, 99, 99], 'Following batches neither skip nor repeat values');
+$page = $more_history(99, 0);
+check(count($page['history_values']) === 1 && !$page['history_has_more'], 'The final partial batch hides More');
+$page = $more_history(98, 0);
+check($page['history_values'] === [] && $page['history_cursor'] === null && !$page['history_has_more'], 'Exhausted history returns an empty final batch');
+API::$calls = [];
+$page = $more_history(100, 500, '999');
+check(isset(json_decode($page['main_block'], true)['error']), 'An unrelated item cannot be loaded through an event');
+check(count(API::$calls) === 2, 'Reject unrelated items before querying item history');
+API::$items = [];
+check(isset(json_decode($more_history(100, 500)['main_block'], true)['error']), 'Inaccessible items cannot expose history');
+API::$items = [['itemid' => '10', 'name' => 'Binary metric', 'value_type' => ITEM_VALUE_TYPE_BINARY]];
+check(isset(json_decode($more_history(100, 500)['main_block'], true)['error']), 'Binary payloads are not paged as text');
+API::$items[0]['value_type'] = ITEM_VALUE_TYPE_UINT64;
+API::$item_history = false;
+check(isset(json_decode($more_history(100, 500)['main_block'], true)['error']), 'History lookup failures remain retryable errors');
 
 // Evaluate the view’s actual calendar preparation without rendering a Zabbix page.
 $view = file_get_contents(dirname(__DIR__).'/views/problemanalist.view.php');

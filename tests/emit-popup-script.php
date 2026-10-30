@@ -6,6 +6,8 @@ require $ui_root.'/include/gettextwrapper.inc.php';
 require $ui_root.'/include/translateDefines.inc.php';
 require $ui_root.'/include/func.inc.php';
 require $ui_root.'/include/html.inc.php';
+require $ui_root.'/include/classes/db/DB.php';
+$DB = ['TYPE' => ZBX_DB_POSTGRESQL];
 require $ui_root.'/include/classes/core/CAutoloader.php';
 $autoloader = new CAutoloader();
 $autoloader->addNamespace('', [$ui_root.'/include/classes/html', $ui_root.'/include/classes/core',
@@ -64,15 +66,24 @@ if ($scenario === 'recovered') {
     $event['r_eventid'] = '2';
     $event['recovery_clock'] = $event['clock'] + 120;
 }
+$history_item = ['itemid' => '10', 'name' => 'Example <item>', 'value_type' => ITEM_VALUE_TYPE_TEXT];
+$history_values = array_map(static function ($clock) {
+    return ['clock' => $clock, 'ns' => 0, 'value' => '<script> & "quoted"'];
+}, [100, 90, 80]);
 $response = (new ViewFixture())->render([
     'tab' => $argv[1] ?? 'overview', 'event' => $event,
     'host' => ($argv[1] ?? 'overview') === 'host' ? null : $host, 'trigger' => null,
     'is_fragment' => $scenario === 'fragment',
     'closing_pending' => $scenario === 'closing',
     'can_acknowledge' => in_array($scenario, ['permitted', 'acknowledged', 'ack-only']),
+    'can_comment' => in_array($scenario, ['permitted', 'acknowledged', 'comment-only']),
     'can_close' => in_array($scenario, ['permitted', 'acknowledged']),
     'can_change_severity' => in_array($scenario, ['permitted', 'acknowledged']),
     'pattern_events' => [['clock' => strtotime('2026-03-30 00:30:00')]],
+    'operational_data' => ['value' => '', 'history' => $scenario === 'history-preview'
+        ? [['item' => $history_item, 'values' => $history_values]] : []],
+    'history_item' => $history_item, 'history_values' => $history_values, 'history_has_more' => true,
+    'history_cursor' => ['clock' => 80, 'ns' => 0],
     'items' => [['itemid' => '1', 'name' => 'Fixture metric']],
     'monthly_comparison' => ['months' => [['name' => 'March 2026', 'count' => 1, 'change_percentage' => 0]]]
 ]);

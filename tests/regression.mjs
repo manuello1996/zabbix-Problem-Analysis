@@ -17,6 +17,12 @@ export async function runRegression(fixture, asset, popupAsset, fragments = {}, 
     assert.equal(config.eventData.problem_name, fixture.event.name);
     assert(!fixture.response.body.includes('chart.php'), 'Graphs must not load in the initial popup');
     assert(!fixture.response.body.includes('Monthly Comparison'), 'Comparison belongs only to Timeline');
+    const cancelButton = fixture.response.buttons.at(-1);
+    assert.equal(cancelButton.title, 'Cancel');
+    assert(cancelButton.cancel && cancelButton.class.includes('js-cancel'),
+        'The final footer button is always the native Cancel action');
+    assert.equal(vm.runInNewContext('(function () {' + cancelButton.action + '})()'), true,
+        'Cancel must close the popup');
     for (const [tab, fragment] of Object.entries(fragments)) {
         assert.equal(fragment.response.body.includes('Monthly Comparison'), tab === 'timeline');
         assert.equal(fragment.response.body.includes('chart.php'), tab === 'graphs');
@@ -27,6 +33,21 @@ export async function runRegression(fixture, asset, popupAsset, fragments = {}, 
         assert(fragments.graphs.response.body.includes('width="800"'));
         assert(fragments.graphs.response.body.includes('height="300"'), 'Graph images reserve space before loading');
         assert(!fragments.graphs.response.body.includes('file:///'), 'Charts use frontend URLs');
+    }
+    if (actionFixtures['history-preview']) {
+        const body = actionFixtures['history-preview'].response.body;
+        assert(body.includes('data-history-item="10"') && body.includes('data-history-more=""'));
+        assert(body.includes('data-before-clock="80"') && body.includes('data-before-ns="0"'));
+        assert.equal((body.match(/class="operational-history-value"/g) || []).length, 3,
+            'Each preview starts with three values');
+        assert(!body.includes('<script>') && body.includes('&lt;script&gt;'), 'Preview values are escaped');
+    }
+    if (actionFixtures['history-fragment']) {
+        const rendered = actionFixtures['history-fragment'];
+        assert.equal(rendered.inline, '');
+        assert.equal((rendered.response.body.match(/class="operational-history-value"/g) || []).length, 3);
+        assert(rendered.response.has_more && rendered.response.cursor.clock === 80);
+        assert(!rendered.response.body.includes('<script>'), 'Older values use the same safe native formatting');
     }
     for (const [scenario, rendered] of Object.entries(actionFixtures)) {
         assert.equal(rendered.response.body.includes('data-problem-action="close"'),
@@ -50,6 +71,22 @@ export async function runRegression(fixture, asset, popupAsset, fragments = {}, 
         assert(actionFixtures.closing.response.body.includes('Recovery time'));
         assert(actionFixtures.closing.response.body.includes('Pending'));
         assert(!actionFixtures.closing.response.body.includes('data-problem-action="close"'));
+    }
+    for (const scenario of ['permitted', 'readonly', 'comment-only']) {
+        const rendered = actionFixtures['update-' + scenario];
+        if (!rendered) continue;
+        const allowed = scenario !== 'readonly';
+        assert.equal(rendered.response.body.includes('data-problem-comment'), allowed,
+            'Update renders a comment field only with the add-comments permission');
+        assert.equal(rendered.response.body.includes('data-problem-action="comment"'), allowed);
+        assert.equal(rendered.response.comment_actions.canComment, allowed);
+        if (allowed) {
+            assert(rendered.response.body.includes('maxlength="'));
+            assert(rendered.response.body.includes('data-comment-form="" hidden="hidden"'),
+                'The comment editor is hidden until the footer action is used');
+            assert(!rendered.response.body.includes('Add comment'), 'Add comment belongs in the popup footer');
+            assert.equal(rendered.response.comment_actions.csrfToken, 'fixture-csrf-acknowledge');
+        }
     }
     new vm.Script(popupAsset);
     const exportsSource = popupAsset.replace('return {displayServicesTree, displayNoServicesMessage, selectService, filterServices};',
@@ -86,23 +123,17 @@ export async function runRegression(fixture, asset, popupAsset, fragments = {}, 
     assert(slaHtml.includes('Below target'), 'Available SLI is compared with its configured target');
     const serviceCards = new Map(['1', '2'].map(id => [id, {
         dataset: {serviceid: id}, closest() { return null; }, style: {}, classList: {add() {}, remove() {}}, open: false, hidden: false,
-        status: {}, sla: {}, button: {disabled: false}, feedback: {}, scrollIntoView() {},
-        querySelector(selector) {
-            return selector === '.service-status' ? this.status
-                : selector === '[data-service-refresh]' ? this.button
-                : selector === '[data-service-feedback]' ? this.feedback : this.sla;
-        }
+        scrollIntoView() {}
     }]));
     const emptySearch = {hidden: true};
     const treeFixture = {innerHTML: '', querySelectorAll: () => [...serviceCards.values()]};
     let detailRequests = 0;
-    let detailResolve;
     const serviceRoot = {
         querySelector(selector) { return selector === '#services-tree-container' ? treeFixture : emptySearch; },
         querySelectorAll() { return [...serviceCards.values()]; }
     };
     const servicesPopup = {root: serviceRoot, config, closed: false, scheduleLayout() {},
-        fetchJson() { detailRequests++; return new Promise(resolve => { detailResolve = resolve; }); }};
+        fetchJson() { detailRequests++; throw new Error('Unexpected service request'); }};
     const interactiveServices = context.window.createServiceUi(servicesPopup);
     interactiveServices.displayServicesTree([
         {serviceid: '1', name: 'Database', status: -1, has_sla: false,
@@ -113,7 +144,9 @@ export async function runRegression(fixture, asset, popupAsset, fragments = {}, 
     ]);
     assert.equal((treeFixture.innerHTML.match(/class="services-hierarchy-path"/g) || []).length, 2,
         'Each matching service renders its own hierarchy');
-    assert(treeFixture.innerHTML.includes('data-services-search') && treeFixture.innerHTML.includes('data-refresh-services'));
+    assert(treeFixture.innerHTML.includes('data-services-search'));
+    assert(!treeFixture.innerHTML.includes('data-refresh-services') && !treeFixture.innerHTML.includes('data-service-refresh'),
+        'Services uses the popup Refresh button without duplicate tab or card controls');
     assert(treeFixture.innerHTML.includes('Matching tag rules') && !treeFixture.innerHTML.includes('<img'));
     assert(treeFixture.innerHTML.includes('<details class="analist-related-services" data-services-related><summary>Related services (2)'),
         'Related services are preloaded in a collapsed group');
@@ -129,18 +162,10 @@ export async function runRegression(fixture, asset, popupAsset, fragments = {}, 
     assert(serviceCards.get('1').hidden && !serviceCards.get('2').hidden, 'Search includes hierarchy names');
     interactiveServices.filterServices('missing'); assert(!emptySearch.hidden);
     interactiveServices.filterServices(''); assert(emptySearch.hidden);
-    let detail = interactiveServices.selectService('1', true);
-    assert.equal(interactiveServices.selectService('1', true), detail, 'Repeated service refreshes reuse the pending request');
-    assert.equal(detailRequests, 1);
-    assert(serviceCards.get('1').open && serviceCards.get('1').button.disabled);
-    detailResolve({success: true, data: {serviceid: '1', status: 2, has_sla: false}}); await detail;
-    assert.equal(serviceCards.get('1').feedback.textContent, 'Service updated');
-    assert.equal(serviceCards.get('1').status.textContent, 'Warning');
-    assert(!serviceCards.get('1').button.disabled);
-    detail = interactiveServices.selectService('1', true);
-    detailResolve({success: false, error: {message: 'Refresh denied'}}); await detail;
-    assert.equal(serviceCards.get('1').feedback.textContent, 'Refresh denied', 'Refresh errors are visible');
-    assert(!serviceCards.get('1').button.disabled);
+    assert(serviceCards.get('1').open, 'Hierarchy links still expand the selected service');
+    assert.equal(detailRequests, 0, 'Service navigation uses cached cards');
+    interactiveServices.displayNoServicesMessage();
+    assert(!treeFixture.innerHTML.includes('data-refresh-services'), 'Empty Services has no duplicate refresh control');
     for (const [value, label] of Object.entries(config.statusLabels)) {
         assert.equal(serviceUi.getServiceStatusText(Number(value)), label);
     }
@@ -186,19 +211,55 @@ export async function runRegression(fixture, asset, popupAsset, fragments = {}, 
         removeAttribute(name) { delete this.attributes[name]; }
         append(...children) { this.children.push(...children); }
         querySelector() { return this.children[0]; }
-        replaceChildren(value) { this.textContent = value; }
+        replaceChildren(value = '') { this.textContent = value; this.innerHTML = ''; this.children = []; }
+        focus() { this.focused = true; }
+        remove() { this.removed = true; }
     }
     function popupRoot() {
         const root = new Target();
         root.isConnected = true;
         root.dialogue = new Target();
         root.dialogue.dataset = {dialogueid: String(roots.size)};
+        const dialogueClasses = new Set();
+        root.dialogue.classList = {add: name => dialogueClasses.add(name), remove: name => dialogueClasses.delete(name),
+            contains: name => dialogueClasses.has(name)};
+        root.cancelButton = {className: 'btn-alt js-cancel', disabled: false};
+        root.footerButtons = [root.cancelButton];
+        root.headerButtons = [];
+        root.dialogue.querySelector = selector => selector === '.btn-overlay-close'
+            ? {before(button) {
+                root.headerButtons.push(button);
+                root.headerRefresh = button;
+            }} : selector === '.overlay-dialogue-footer .js-cancel' ? {before(button) {
+                root.footerButtons.splice(root.footerButtons.length - 1, 0, button);
+                root.footerComment = button;
+            }} : null;
+        root.contains = target => target.popupRoot === root;
         root.panels = ['overview', 'host', 'timeline', 'patterns', 'graphs', 'update', 'services'].map(key => new Panel(key));
         root.buttons = root.panels.map(panel => ({dataset: {tabTarget: panel.dataset.tab},
             setAttribute() {}, parentElement: {classList: {toggle() {}}}, focus() {}}));
         root.actionButtons = [{disabled: false}, {disabled: false}];
         root.message = new Panel('');
-        root.querySelector = () => root.message;
+        root.commentMessage = new Panel('');
+        root.comment = new Panel(''); root.comment.value = '';
+        root.commentForm = new Panel(''); root.commentForm.id = 'comment-form-' + roots.size; root.commentForm.hidden = true;
+        root.commentRendered = false;
+        let updateMarkup = '';
+        Object.defineProperty(root.panels.find(panel => panel.dataset.tab === 'update'), 'innerHTML', {
+            get() { return updateMarkup; },
+            set(value) {
+                updateMarkup = value;
+                root.commentRendered = String(value).includes('data-comment-form');
+                root.commentForm.hidden = true;
+                root.comment.value = '';
+                root.commentMessage.textContent = '';
+            }
+        });
+        root.servicesTree = new Panel('');
+        root.querySelector = selector => selector === '[data-problem-comment]' ? (root.commentRendered ? root.comment : null)
+            : selector === '[data-comment-message]' ? (root.commentRendered ? root.commentMessage : null)
+            : selector === '[data-comment-form]' ? (root.commentRendered ? root.commentForm : null)
+            : selector === '#services-tree-container' ? root.servicesTree : root.message;
         root.querySelectorAll = selector => selector === '[data-tab]' ? root.panels
             : selector === '[data-problem-action]' ? root.actionButtons : root.buttons;
         root.closest = () => root.dialogue;
@@ -274,6 +335,11 @@ export async function runRegression(fixture, asset, popupAsset, fragments = {}, 
     assert.equal(popupA.layoutFrame, null, 'Closing cancels pending layout work');
     assert.equal(rootA.handlers.get('click').size, 0, 'Closing removes delegated handlers');
     assert.equal(rootA.handlers.get('load').size, 0, 'Closing removes image handlers');
+    assert(rootA.headerRefresh.removed && rootA.headerRefresh.handlers.get('click').size === 0,
+        'Closing removes the header Refresh button and its handler');
+    assert(rootA.footerComment.removed && rootA.footerComment.handlers.get('click').size === 0,
+        'Closing removes the footer Add comment button and its handler');
+    assert(!rootA.dialogue.classList.contains('analist-problem-dialogue'), 'Closing removes the popup layout class');
     rootB.isConnected = false; Popup.cleanupDetached();
     assert(popupB.closed && Popup.instances.size === 0, 'Removed popups are cleaned up');
     assert.equal(frames.size, 0, 'No layout callbacks remain after cleanup');
@@ -403,6 +469,208 @@ export async function runRegression(fixture, asset, popupAsset, fragments = {}, 
     assert.equal(pending.length, severityRequestCount, 'Limits and permissions prevent severity requests');
     severityRoot.dialogue.dispatch('dialogue.close');
 
+    const refreshRoot = popupRoot(); roots.set('refresh', refreshRoot);
+    const refreshPopup = Popup.mount({...config, rootId: 'refresh', problemActions: {...actions}});
+    assert.equal(refreshRoot.headerRefresh, refreshPopup.refreshButton, 'Refresh is inserted beside the header Close button');
+    assert.equal(refreshPopup.refreshButton.textContent, config.refreshLabel);
+    let index = pending.length;
+    let loading = refreshPopup.activateTab('timeline');
+    pending[index].resolve({body: 'Cached timeline'}); await loading;
+    index = pending.length;
+    loading = refreshPopup.activateTab('host');
+    await refreshPopup.activateTab('timeline');
+    const oldServices = refreshPopup.serviceUi;
+    const refreshIndex = pending.length;
+    let reloading = refreshPopup.refreshTab();
+    assert.equal(refreshPopup.refreshTab(), reloading, 'Repeated refreshes share the active request');
+    assert(pending[index].options.signal.aborted, 'Refreshing cancels loads for inactive tabs');
+    assert(refreshPopup.refreshButton.disabled);
+    await loading;
+    assert.equal(pending.length, refreshIndex + 1, 'Refresh fetches only the selected tab');
+    assert.equal(pending[refreshIndex].options.body.get('tab'), 'timeline');
+    assert.equal(refreshPopup.activeTab, 'timeline');
+    assert.equal(refreshPopup.tabs.size, 1);
+    assert.equal(refreshPopup.panels.get('overview').innerHTML, '', 'Discard inactive markup as well as cached state');
+    assert.notEqual(refreshPopup.serviceUi, oldServices, 'Discard cached service cards and requests');
+    assert.equal(refreshPopup.panels.get('timeline').attributes['aria-busy'], 'true',
+        'A cancelled load cannot clear the current request loading state');
+    pending[refreshIndex].resolve({body: 'Fresh timeline'}); await reloading;
+    assert.equal(refreshPopup.panels.get('timeline').innerHTML, 'Fresh timeline');
+    assert(!refreshPopup.refreshButton.disabled);
+    index = pending.length;
+    loading = refreshPopup.activateTab('overview');
+    assert.equal(pending.length, index + 1, 'Discarded Overview refetches on its next visit');
+    pending[index].resolve({body: 'Fresh overview', problem_actions: {...actions}}); await loading;
+    index = pending.length;
+    reloading = refreshPopup.refreshTab();
+    pending[index].resolve({error: {messages: ['Refresh failed']}}); await reloading;
+    assert(!refreshPopup.refreshButton.disabled && !refreshPopup.tabs.get('overview').loaded,
+        'Failed refreshes remain retryable and restore the header button');
+    index = pending.length;
+    reloading = refreshPopup.refreshTab();
+    pending[index].resolve({body: 'Retried overview', problem_actions: {...actions}}); await reloading;
+    index = pending.length;
+    loading = refreshPopup.activateTab('graphs');
+    reloading = refreshPopup.refreshTab();
+    await loading;
+    assert.equal(refreshPopup.panels.get('graphs').attributes['aria-busy'], 'true',
+        'The aborted request for the same tab cannot finish the new request');
+    pending[index + 1].resolve({body: 'Fresh graphs'}); await reloading;
+    index = pending.length;
+    loading = refreshPopup.activateTab('services');
+    pending[index].resolve({success: true, data: []}); await loading;
+    index = pending.length;
+    reloading = refreshPopup.refreshTab();
+    assert(pending[index].url.endsWith('problemanalist.service.get'), 'The shared Refresh reloads Services');
+    assert.equal(pending[index].options.body.get('eventid'), config.eventData.eventid);
+    assert.equal(pending.length, index + 1, 'Services refresh issues one request');
+    pending[index].resolve({success: true, data: []}); await reloading;
+    assert.equal(refreshPopup.activeTab, 'services');
+    assert.equal(refreshPopup.tabs.size, 1, 'Services refresh invalidates other tabs');
+    refreshRoot.dialogue.dispatch('dialogue.close');
+
+    const commentRoot = popupRoot(); roots.set('comment', commentRoot);
+    const commentPopup = Popup.mount({...config, rootId: 'comment', problemActions: {...actions, canComment: false}});
+    assert.equal(commentRoot.footerButtons.at(-2), commentPopup.commentButton, 'Add comment is immediately before Cancel');
+    assert.equal(commentRoot.footerButtons.at(-1), commentRoot.cancelButton, 'Cancel stays last at the bottom right');
+    assert(!commentRoot.headerButtons.includes(commentPopup.commentButton), 'Add comment is removed from the header');
+    assert(commentRoot.dialogue.classList.contains('analist-problem-dialogue'), 'The popup uses a layout that keeps its footer at the bottom');
+    assert.equal(commentPopup.commentButton.textContent, config.addCommentLabel);
+    assert(commentPopup.commentButton.hidden, 'The footer action obeys the add-comments permission');
+    index = pending.length;
+    await commentPopup.openCommentForm();
+    assert.equal(pending.length, index, 'An unavailable comment action must not fetch a tab');
+    const commentMarkup = actionFixtures['update-permitted']?.response.body || '<div data-comment-form></div>';
+    index = pending.length;
+    loading = commentPopup.activateTab('update');
+    pending[index].resolve({body: commentMarkup, comment_actions: {canComment: true, csrfToken: 'comment-token'}});
+    await loading;
+    assert(commentPopup.config.problemActions.canComment && commentPopup.config.problemActions.canClose,
+        'Loading comment permissions must preserve Overview action permissions');
+    assert(commentRoot.commentForm.hidden && !commentPopup.commentButton.hidden,
+        'Visiting Update shows history with the editor initially collapsed');
+    await commentPopup.activateTab('overview');
+    index = pending.length;
+    await commentPopup.openCommentForm();
+    assert.equal(commentPopup.activeTab, 'update', 'The footer action opens Update from another tab');
+    assert(!commentRoot.commentForm.hidden && commentRoot.comment.focused);
+    assert.equal(commentPopup.commentButton.attributes['aria-expanded'], 'true');
+    assert.equal(commentPopup.commentButton.attributes['aria-controls'], commentRoot.commentForm.id);
+    assert.equal(pending.length, index, 'Opening the editor reuses loaded Update history');
+    index = pending.length;
+    commentRoot.comment.value = ' \n ';
+    await commentPopup.updateProblem('comment');
+    assert.equal(pending.length, index, 'Blank comments must not be submitted');
+    assert.equal(commentRoot.commentMessage.textContent, actions.emptyCommentLabel);
+    assert(commentRoot.comment.focused);
+    const commentText = 'Investigating <script> & "quoted"\nSecond line';
+    commentRoot.comment.value = commentText;
+    let commenting = commentPopup.updateProblem('comment');
+    await commentPopup.updateProblem('comment');
+    await commentPopup.refreshTab();
+    assert.equal(pending.length, index + 1, 'Duplicate comments and refreshes cannot interrupt a pending mutation');
+    assert(commentRoot.comment.disabled && commentPopup.refreshButton.disabled && commentPopup.commentButton.disabled);
+    assert(!commentRoot.cancelButton.disabled, 'Cancel stays enabled during comment submissions');
+    const commentParams = pending[index].options.body;
+    assert.equal(commentParams.get('message'), commentText, 'Preserve multiline comments as form data');
+    assert.equal(commentParams.get(actions.csrfTokenName), 'comment-token');
+    assert.equal(commentParams.get('eventids[]'), config.eventData.eventid);
+    assert.equal(commentParams.get('scope'), String(actions.selectedScope));
+    for (const field of ['close_problem', 'acknowledge_problem', 'unacknowledge_problem', 'change_severity']) {
+        assert.equal(commentParams.get(field), null, 'Adding a comment does not perform other update actions');
+    }
+    pending[index].resolve({error: {messages: ['Cannot add comment']}}); await commenting;
+    assert.equal(commentRoot.comment.value, commentText, 'Failed comments retain the draft');
+    assert.equal(commentRoot.commentMessage.textContent, 'Cannot add comment');
+    assert(!commentRoot.commentForm.hidden, 'Failed submissions keep the editor open');
+    assert(!commentRoot.comment.disabled && !commentPopup.refreshButton.disabled);
+    index = pending.length;
+    commenting = commentPopup.updateProblem('comment');
+    pending[index].resolve({success: {title: 'Event updated'}});
+    while (pending.length < index + 2) await Promise.resolve();
+    assert.equal(pending[index + 1].options.body.get('tab'), 'update', 'Successful comments reload Update history');
+    pending[index + 1].resolve({body: commentMarkup, comment_actions: {canComment: true, csrfToken: 'next-token'}});
+    await commenting;
+    assert.equal(commentPopup.activeTab, 'update', 'Adding a comment keeps Update selected');
+    assert.equal(commentPopup.tabs.size, 1, 'Other tabs stay invalidated after adding a comment');
+    assert.equal(commentRoot.commentMessage.textContent, actions.commentAddedLabel);
+    assert(commentRoot.commentForm.hidden && commentRoot.comment.value === '', 'Success closes and clears the editor');
+    assert.equal(commentPopup.commentButton.attributes['aria-expanded'], 'false');
+    commentPopup.invalidateTabs();
+    index = pending.length;
+    const openingComment = commentPopup.openCommentForm();
+    assert.equal(pending[index].options.body.get('tab'), 'update', 'The footer action fetches discarded Update history');
+    pending[index].resolve({body: commentMarkup, comment_actions: {canComment: true, csrfToken: 'next-token'}});
+    await openingComment;
+    assert(!commentRoot.commentForm.hidden && commentRoot.comment.focused);
+    commentPopup.config.problemActions.canComment = false;
+    commentPopup.syncCommentButton();
+    index = pending.length;
+    await commentPopup.updateProblem('comment');
+    await commentPopup.openCommentForm();
+    assert.equal(pending.length, index, 'Unavailable comment actions must not submit');
+    assert(commentPopup.commentButton.hidden);
+    commentRoot.dialogue.dispatch('dialogue.close');
+
+    const historyRoot = popupRoot(); roots.set('history', historyRoot);
+    const historyPopup = Popup.mount({...config, rootId: 'history'});
+    const historyRow = new Panel(''); historyRow.dataset.historyItem = '10'; historyRow.popupRoot = historyRoot;
+    const historyValues = {innerHTML: 'Initial three values', insertAdjacentHTML(position, html) { this.innerHTML += html; }};
+    const historyMessage = new Panel('');
+    historyRow.querySelector = selector => selector === '[data-history-values]' ? historyValues : historyMessage;
+    const moreButton = new Panel(''); moreButton.closest = () => historyRow;
+    moreButton.dataset = {beforeClock: '180', beforeNs: '0'};
+    index = pending.length;
+    let more = historyPopup.loadMoreHistory(moreButton);
+    assert.equal(historyPopup.loadMoreHistory(moreButton), more, 'Repeated More clicks reuse the pending item request');
+    assert.equal(pending.length, index + 1);
+    assert.equal(pending[index].options.body.get('tab'), 'history');
+    assert.equal(pending[index].options.body.get('itemid'), '10');
+    assert.equal(pending[index].options.body.get('before_clock'), '180');
+    assert.equal(pending[index].options.body.get('before_ns'), '0');
+    assert(moreButton.disabled && historyRow.attributes['aria-busy'] === 'true');
+    const moreBody = actionFixtures['history-fragment']?.response.body || '<div>100</div><div>90</div><div>80</div>';
+    pending[index].resolve({body: moreBody, has_more: true, cursor: {clock: 80, ns: 0}}); await more;
+    assert.equal(historyValues.innerHTML, 'Initial three values' + moreBody, 'More appends older values without replacing the preview');
+    assert.equal(moreButton.dataset.beforeClock, 80);
+    assert(!moreButton.disabled && !moreButton.hidden);
+    index = pending.length;
+    more = historyPopup.loadMoreHistory(moreButton);
+    pending[index].resolve({error: {messages: ['History unavailable']}}); await more;
+    assert.equal(historyMessage.textContent, 'History unavailable');
+    assert(!moreButton.disabled, 'Failed history requests retain a retryable More button');
+    index = pending.length;
+    more = historyPopup.loadMoreHistory(moreButton);
+    pending[index].resolve({body: '<div>70</div>', has_more: false, cursor: {clock: 70, ns: 0}}); await more;
+    assert(moreButton.hidden && historyValues.innerHTML.endsWith('<div>70</div>'), 'The final partial batch hides More');
+    index = pending.length;
+    more = historyPopup.loadMoreHistory(moreButton);
+    pending[index].resolve({body: '', has_more: false, cursor: null}); await more;
+    assert.equal(historyMessage.textContent, config.noMoreHistoryLabel);
+    index = pending.length;
+    more = historyPopup.loadMoreHistory(moreButton);
+    const beforeDetachedResponse = historyValues.innerHTML;
+    historyRow.popupRoot = null;
+    pending[index].resolve({body: 'Detached response', has_more: false, cursor: null}); await more;
+    assert.equal(historyValues.innerHTML, beforeDetachedResponse, 'Replaced item rows ignore old responses');
+    historyRow.popupRoot = historyRoot;
+    index = pending.length;
+    more = historyPopup.loadMoreHistory(moreButton);
+    reloading = historyPopup.refreshTab();
+    await more;
+    assert(pending[index].options.signal.aborted && historyPopup.historyRequests.size === 0,
+        'Refreshing discards pending history requests');
+    pending[index + 1].resolve({body: 'Fresh overview'}); await reloading;
+    historyRow.popupRoot = null;
+    index = pending.length;
+    await historyPopup.loadMoreHistory(moreButton);
+    assert.equal(pending.length, index, 'Detached item previews cannot fetch more history');
+    historyRow.popupRoot = historyRoot;
+    more = historyPopup.loadMoreHistory(moreButton);
+    historyRoot.dialogue.dispatch('dialogue.close'); await more;
+    assert(pending[index].options.signal.aborted && historyPopup.historyRequests.size === 0,
+        'Closing cancels item history requests');
+
     function tableFixture() {
         const header = new Element('tr');
         header.appendChild(new Element('th')); header.appendChild(new Element('th'));
@@ -464,6 +732,11 @@ if (typeof process !== 'undefined' && process.argv[1] && path.resolve(process.ar
     const fragments = Object.fromEntries(['host', 'timeline', 'patterns', 'graphs', 'update'].map(tab => [tab, render(tab)]));
     const actionFixtures = Object.fromEntries(['readonly', 'permitted', 'acknowledged', 'ack-only', 'fragment', 'recovered', 'closing']
         .map(scenario => [scenario, render('overview', scenario)]));
+    for (const scenario of ['permitted', 'readonly', 'comment-only']) {
+        actionFixtures['update-' + scenario] = render('update', scenario);
+    }
+    actionFixtures['history-preview'] = render('overview', 'history-preview');
+    actionFixtures['history-fragment'] = render('history');
     await runRegression(render('overview'), fs.readFileSync(path.join(root, 'assets/js/analist-problem.js'), 'utf8'),
         fs.readFileSync(path.join(root, 'assets/js/analist-popup.js'), 'utf8'), fragments, actionFixtures);
 }

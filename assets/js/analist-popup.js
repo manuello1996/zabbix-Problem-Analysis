@@ -507,20 +507,10 @@
         const serviceStatusLabels = popup.config.statusLabels;
         const slaLabels = popup.config.slaLabels;
         const labels = popup.config.serviceLabels;
-        const serviceRequests = new Map();
         let currentServices = [];
         function escapeServiceHtml(value) {
             return String(value ?? "").replace(/&/g, "&amp;").replace(/</g, "&lt;")
                 .replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/\x27/g, "&#39;");
-        }
-
-        function requestServices(parameters) {
-            return popup.fetchJson("problemanalist.service.get", parameters).then(result => {
-                if (!result.success || result.data === undefined) {
-                    throw new Error(result.error?.message || "Unable to load services");
-                }
-                return result.data;
-            });
         }
 
         function displayServicesTree(services) {
@@ -542,8 +532,7 @@
             tree.innerHTML = '<div class="services-summary-header"><h4>' + escapeServiceHtml(labels.matching)
                 + ' (' + services.length + ')</h4><p>' + escapeServiceHtml(labels.current) + '</p></div>'
                 + '<div class="analist-services-toolbar"><label>' + escapeServiceHtml(labels.search)
-                + '<input type="search" data-services-search autocomplete="off"></label>'
-                + '<button type="button" class="btn-alt" data-refresh-services>' + escapeServiceHtml(labels.refresh) + '</button></div>'
+                + '<input type="search" data-services-search autocomplete="off"></label></div>'
                 + '<div class="analist-services-list" data-services-matching>' + services.map(service => createServiceCard(service, true)).join('') + '</div>'
                 + '<p data-services-search-empty role="status" hidden>' + escapeServiceHtml(labels.empty) + '</p>'
                 + relatedHtml;
@@ -635,10 +624,7 @@
                 + escapeServiceHtml(getServiceStatusText(service.status)) + '</span></span></summary>'
                 + '<div class="analist-service-details">' + (path.length > 1 ? createHierarchyPath(path) : '')
                 + rules + '<h5 class="analist-service-details-heading">' + escapeServiceHtml(labels.details) + '</h5>'
-                + createServiceSlaInfo(service)
-                + '<button type="button" class="btn-alt" data-service-refresh data-service-action="' + id + '">'
-                + escapeServiceHtml(labels.refreshService) + '</button>'
-                + '<p data-service-feedback role="status" aria-live="polite"></p></div></details>';
+                + createServiceSlaInfo(service) + '</div></details>';
         }
 
         function getServiceStatusClass(status) {
@@ -654,43 +640,7 @@
             return Array.from(cards).find(card => card.dataset.serviceid === String(serviceid));
         }
 
-        function loadServiceSLI(serviceid) {
-            const key = String(serviceid);
-            if (serviceRequests.has(key)) return serviceRequests.get(key);
-            const card = findServiceCard(key);
-            const button = card?.querySelector('[data-service-refresh]');
-            const feedback = card?.querySelector('[data-service-feedback]');
-            if (button) button.disabled = true;
-            if (feedback) feedback.textContent = labels.refreshing;
-            const request = requestServices({serviceid: key}).then(service => {
-                if (popup.closed) return;
-                updateServiceSLIDisplay(key, service);
-                currentServices = currentServices.map(current => String(current.serviceid) === key ? {...current, ...service} : current);
-                if (feedback) feedback.textContent = labels.refreshed;
-                popup.scheduleLayout();
-            }).catch(error => {
-                if (!popup.closed && error.name !== 'AbortError' && feedback) feedback.textContent = error.message;
-            }).finally(() => {
-                serviceRequests.delete(key);
-                if (!popup.closed && button) button.disabled = false;
-            });
-            serviceRequests.set(key, request);
-            return request;
-        }
-
-        function updateServiceSLIDisplay(serviceid, service) {
-            const card = findServiceCard(serviceid);
-            if (!card) return;
-            const status = card.querySelector(".service-status");
-            status.className = "service-status " + getServiceStatusClass(service.status);
-            status.textContent = getServiceStatusText(service.status);
-            const sla = card.querySelector(".service-sla-info, .service-no-sla");
-            if (sla) sla.outerHTML = createServiceSlaInfo(service);
-            const summary = card.querySelector('[data-service-sla-summary]');
-            if (summary) summary.textContent = serviceSlaSummary(service);
-        }
-
-        function selectService(serviceid, refresh = false) {
+        function selectService(serviceid) {
             const tree = root.querySelector("#services-tree-container");
             if (!tree) return;
             tree.querySelectorAll(".service-card").forEach(card => {
@@ -705,7 +655,6 @@
                 selectedCard.classList.add("is-selected");
                 selectedCard.scrollIntoView({behavior: "smooth", block: "nearest"});
                 popup.scheduleLayout();
-                if (refresh) return loadServiceSLI(serviceid);
             }
         }
 
@@ -713,8 +662,7 @@
             const tree = root.querySelector("#services-tree-container");
             if (!tree) return;
             tree.innerHTML = '<div class="services-no-results"><p><strong>' + escapeServiceHtml(labels.none) + '</strong></p>'
-                + '<p>' + escapeServiceHtml(labels.explanation) + '</p><button type="button" class="btn-alt" data-refresh-services>'
-                + escapeServiceHtml(labels.refresh) + '</button></div>';
+                + '<p>' + escapeServiceHtml(labels.explanation) + '</p></div>';
         }
 
         return {displayServicesTree, displayNoServicesMessage, selectService, filterServices};
@@ -756,6 +704,9 @@
             this.recoveryTimer = null;
             this.waitingForRecovery = false;
             this.recoveryDelay = 1000;
+            this.dataVersion = 0;
+            this.refreshPromise = null;
+            this.historyRequests = new Map();
             root.addEventListener('click', event => this.onClick(event), {signal: this.lifecycle.signal});
             root.addEventListener('keydown', event => this.onKeyDown(event), {signal: this.lifecycle.signal});
             root.addEventListener('input', event => {
@@ -771,10 +722,58 @@
             root.addEventListener('load', imageSettled, {capture: true, signal: this.lifecycle.signal});
             root.addEventListener('error', imageSettled, {capture: true, signal: this.lifecycle.signal});
             this.dialogue = root.closest('[data-dialogueid]');
+            this.dialogue?.classList.add('analist-problem-dialogue');
+            const closeButton = this.dialogue?.querySelector('.btn-overlay-close');
+            if (closeButton) {
+                this.refreshButton = document.createElement('button');
+                this.refreshButton.type = 'button';
+                this.refreshButton.className = 'btn-alt analist-popup-refresh';
+                this.refreshButton.textContent = config.refreshLabel;
+                this.refreshButton.addEventListener('click', event => {
+                    event.preventDefault();
+                    this.refreshTab();
+                }, {signal: this.lifecycle.signal});
+                closeButton.before(this.refreshButton);
+            }
+            const cancelButton = this.dialogue?.querySelector('.overlay-dialogue-footer .js-cancel');
+            if (cancelButton) {
+                this.commentButton = document.createElement('button');
+                this.commentButton.type = 'button';
+                this.commentButton.className = 'btn-alt analist-popup-comment';
+                this.commentButton.textContent = config.addCommentLabel;
+                this.commentButton.addEventListener('click', event => {
+                    event.preventDefault();
+                    this.openCommentForm();
+                }, {signal: this.lifecycle.signal});
+                cancelButton.before(this.commentButton);
+            }
             this.dialogue?.addEventListener('dialogue.close', () => this.destroy(),
                 {once: true, signal: this.lifecycle.signal});
             this.activateTab('overview');
             this.trackPendingRecovery();
+        }
+
+        syncCommentButton() {
+            if (!this.commentButton || this.closed) return;
+            const form = this.root.querySelector('[data-comment-form]');
+            this.commentButton.hidden = !this.config.problemActions?.canComment;
+            this.commentButton.disabled = this.updatingProblem || this.refreshPromise !== null;
+            this.commentButton.setAttribute('aria-expanded', String(Boolean(form && !form.hidden && this.activeTab === 'update')));
+            if (form) this.commentButton.setAttribute('aria-controls', form.id);
+            else this.commentButton.removeAttribute('aria-controls');
+        }
+
+        async openCommentForm() {
+            if (this.closed || this.updatingProblem || this.refreshPromise || !this.config.problemActions?.canComment) return;
+            await this.activateTab('update');
+            if (this.closed || this.activeTab !== 'update' || !this.config.problemActions.canComment
+                    || !this.tabs.get('update')?.loaded) return;
+            const form = this.root.querySelector('[data-comment-form]');
+            if (!form) return;
+            form.hidden = false;
+            this.syncCommentButton();
+            this.root.querySelector('[data-problem-comment]')?.focus();
+            this.scheduleLayout();
         }
 
         trackPendingRecovery() {
@@ -794,7 +793,7 @@
         }
 
         onClick(event) {
-            const button = event.target.closest('[data-tab-target], [data-retry-tab], [data-service-action], [data-refresh-services], [data-problem-action], .mnz-pattern-toggle');
+            const button = event.target.closest('[data-tab-target], [data-retry-tab], [data-service-action], [data-problem-action], [data-history-more], .mnz-pattern-toggle');
             if (!button || !this.root.contains(button)) return;
             if (button.dataset.tabTarget) {
                 event.preventDefault();
@@ -804,13 +803,10 @@
                 this.loadTab(button.dataset.retryTab);
             } else if (button.dataset.serviceAction) {
                 event.preventDefault();
-                this.serviceUi.selectService(button.dataset.serviceAction, button.hasAttribute("data-service-refresh"));
-            } else if (button.hasAttribute('data-refresh-services')) {
+                this.serviceUi.selectService(button.dataset.serviceAction);
+            } else if (button.hasAttribute('data-history-more')) {
                 event.preventDefault();
-                if (!this.tabs.get('services')?.promise) {
-                    this.tabs.delete('services');
-                    this.loadTab('services');
-                }
+                this.loadMoreHistory(button);
             } else if (button.dataset.problemAction) {
                 event.preventDefault();
                 this.updateProblem(button.dataset.problemAction);
@@ -858,6 +854,7 @@
                 panel.setAttribute('aria-hidden', String(name !== key));
             }
             this.activeTab = key;
+            this.syncCommentButton();
             this.scheduleLayout();
             return this.loadTab(key);
         }
@@ -870,6 +867,40 @@
                 const overlay = window.overlays_stack?.getById(this.dialogue.dataset.dialogueid);
                 if (overlay?.$dialogue?.[0] === this.dialogue) overlay.centerDialog?.();
             });
+        }
+
+        invalidateTabs() {
+            this.dataVersion++;
+            if (this.recoveryTimer !== null) window.clearTimeout(this.recoveryTimer);
+            this.recoveryTimer = null;
+            for (const request of this.requests) request.abort();
+            this.historyRequests.clear();
+            this.tabs.clear();
+            this.patternRenderer = null;
+            if (window.jQuery) {
+                window.jQuery(this.root).find('*').addBack().off('.analistPatterns').stop(true, true);
+            }
+            for (const panel of this.panels.values()) {
+                panel.replaceChildren();
+                panel.removeAttribute('aria-busy');
+            }
+            this.serviceUi = createServiceUi(this);
+            this.syncCommentButton();
+        }
+
+        refreshTab() {
+            if (this.closed || this.updatingProblem) return Promise.resolve();
+            if (this.refreshPromise) return this.refreshPromise;
+            const key = this.activeTab;
+            this.invalidateTabs();
+            if (this.refreshButton) this.refreshButton.disabled = true;
+            this.refreshPromise = this.loadTab(key).finally(() => {
+                this.refreshPromise = null;
+                if (!this.closed && this.refreshButton) this.refreshButton.disabled = false;
+                this.syncCommentButton();
+            });
+            this.syncCommentButton();
+            return this.refreshPromise;
         }
 
         loadTab(key) {
@@ -891,7 +922,7 @@
                 if (this.config.eventData.hostid) params.hostid = this.config.eventData.hostid;
             }
             state.promise = this.fetchJson(action, params).then(result => {
-                if (this.closed) return;
+                if (this.closed || this.tabs.get(key) !== state) return;
                 if (key === 'services') {
                     if (!result.success || !Array.isArray(result.data)) throw new Error(result.error?.message || 'Unable to load services');
                     panel.innerHTML = '<div id="services-tree-container" class="services-container"></div>';
@@ -900,6 +931,9 @@
                 } else {
                     if (typeof result.body !== 'string') throw new Error('Invalid tab response');
                     panel.innerHTML = result.body;
+                    if (key === 'update' && result.comment_actions) {
+                        Object.assign(this.config.problemActions, result.comment_actions);
+                    }
                     if (key === 'overview' && result.problem_actions) {
                         if (this.waitingForRecovery && !result.problem_actions.recoveryReady) {
                             result.problem_actions.closingPending = true;
@@ -921,11 +955,14 @@
                 state.loaded = true;
                 this.scheduleLayout();
             }).catch(error => {
-                if (!this.closed && error.name !== 'AbortError') this.showError(panel, key, error);
+                if (!this.closed && this.tabs.get(key) === state && error.name !== 'AbortError') {
+                    this.showError(panel, key, error);
+                }
             }).finally(() => {
                 state.promise = null;
-                if (!this.closed) {
+                if (!this.closed && this.tabs.get(key) === state) {
                     panel.removeAttribute('aria-busy');
+                    this.syncCommentButton();
                     this.scheduleLayout();
                 }
             });
@@ -950,6 +987,49 @@
             }
         }
 
+        loadMoreHistory(button) {
+            const row = button.closest('[data-history-item]');
+            if (this.closed || !row || !this.root.contains(row)) return Promise.resolve();
+            const itemid = row.dataset.historyItem;
+            if (this.historyRequests.has(row)) return this.historyRequests.get(row);
+            const values = row.querySelector('[data-history-values]');
+            const message = row.querySelector('[data-history-message]');
+            const version = this.dataVersion;
+            button.disabled = true;
+            row.setAttribute('aria-busy', 'true');
+            if (message) message.textContent = '';
+            const request = this.fetchJson('problemanalist.tab.get', {
+                eventid: this.config.eventData.eventid, tab: 'history', itemid,
+                before_clock: button.dataset.beforeClock, before_ns: button.dataset.beforeNs
+            }).then(result => {
+                if (this.closed || version !== this.dataVersion || !this.root.contains(row)) return;
+                if (typeof result.body !== 'string' || typeof result.has_more !== 'boolean'
+                        || (result.has_more && !result.cursor)) throw new Error('Invalid history response');
+                values.insertAdjacentHTML('beforeend', result.body);
+                if (result.cursor) {
+                    button.dataset.beforeClock = result.cursor.clock;
+                    button.dataset.beforeNs = result.cursor.ns;
+                }
+                button.hidden = !result.has_more;
+                if (!result.body && message) message.textContent = this.config.noMoreHistoryLabel;
+                this.scheduleLayout();
+            }).catch(error => {
+                if (!this.closed && version === this.dataVersion && this.root.contains(row)
+                        && error.name !== 'AbortError' && message) {
+                    message.textContent = error.message;
+                }
+            }).finally(() => {
+                if (this.historyRequests.get(row) === request) this.historyRequests.delete(row);
+                if (!this.closed && version === this.dataVersion && this.root.contains(row)) {
+                    button.disabled = false;
+                    row.removeAttribute('aria-busy');
+                    this.scheduleLayout();
+                }
+            });
+            this.historyRequests.set(row, request);
+            return request;
+        }
+
         showError(panel, key, error) {
             panel.textContent = '';
             const message = document.createElement('p');
@@ -965,25 +1045,37 @@
 
         async updateProblem(action) {
             const actions = this.config.problemActions;
-            if (this.closed || this.updatingProblem || !actions) return;
+            if (this.closed || this.updatingProblem || this.refreshPromise || !actions) return;
+            const commenting = action === 'comment';
+            const comment = commenting ? this.root.querySelector('[data-problem-comment]') : null;
+            const messageSelector = commenting ? '[data-comment-message]' : '[data-problem-action-message]';
+            const message = this.root.querySelector(messageSelector);
             const fields = {
                 acknowledge: ['acknowledge_problem', actions.acknowledgeAction],
                 unacknowledge: ['unacknowledge_problem', actions.unacknowledgeAction],
                 close: ['close_problem', actions.closeAction],
                 'severity-up': ['change_severity', actions.severityAction],
-                'severity-down': ['change_severity', actions.severityAction]
+                'severity-down': ['change_severity', actions.severityAction],
+                comment: ['message', comment?.value]
             };
             const changingSeverity = action === 'severity-up' || action === 'severity-down';
-            if (!fields[action] || !(changingSeverity ? actions.canChangeSeverity
+            if (!fields[action] || !(commenting ? actions.canComment : changingSeverity ? actions.canChangeSeverity
                     : action === 'close' ? actions.canClose : actions.canAcknowledge)) return;
+            if (commenting && !comment?.value.trim()) {
+                if (message) message.textContent = actions.emptyCommentLabel;
+                comment?.focus();
+                return;
+            }
             const nextSeverity = Number(actions.severity) + (action === 'severity-up' ? 1 : -1);
             if (changingSeverity && (!Number.isInteger(nextSeverity)
                     || nextSeverity < actions.minSeverity || nextSeverity > actions.maxSeverity)) return;
             this.updatingProblem = true;
+            this.syncCommentButton();
+            if (this.refreshButton) this.refreshButton.disabled = true;
+            if (comment) comment.disabled = true;
             const buttons = Array.from(this.root.querySelectorAll('[data-problem-action]'));
             const disabledStates = buttons.map(button => button.disabled);
             buttons.forEach(button => { button.disabled = true; });
-            const message = this.root.querySelector('[data-problem-action-message]');
             if (message) message.textContent = '';
             let updated = false;
             try {
@@ -1001,19 +1093,18 @@
                     this.config.problemActions.closingPending = true;
                     this.trackPendingRecovery();
                 }
-                // Historical panels may now contain stale acknowledgements or close state.
-                for (const request of this.requests) request.abort();
-                this.tabs.clear();
-                this.patternRenderer = null;
-                await this.activateTab('overview');
-                const refreshedMessage = this.root.querySelector('[data-problem-action-message]');
-                if (refreshedMessage) refreshedMessage.textContent = actions.updatedLabel;
+                // Discard stale panels and fetch only the tab needed after the update.
+                this.invalidateTabs();
+                const targetTab = commenting ? 'update' : 'overview';
+                await this.activateTab(targetTab);
+                const refreshedMessage = this.root.querySelector(messageSelector);
+                if (refreshedMessage) refreshedMessage.textContent = commenting ? actions.commentAddedLabel : actions.updatedLabel;
                 if (action === 'close' && !this.config.problemActions.recoveryReady) {
                     this.config.problemActions.closingPending = true;
                     this.trackPendingRecovery();
                 }
-                if (!this.tabs.get('overview')?.loaded && !this.closed) {
-                    const panel = this.panels.get('overview');
+                if (!this.tabs.get(targetTab)?.loaded && !this.closed) {
+                    const panel = this.panels.get(targetTab);
                     panel.querySelector('[role="alert"]')?.replaceChildren(actions.refreshErrorLabel);
                 }
                 if (window.jQuery) window.jQuery.publish?.('acknowledge.create', [result]);
@@ -1021,12 +1112,16 @@
                 if (!this.closed && error.name !== 'AbortError' && message) message.textContent = error.message;
             } finally {
                 this.updatingProblem = false;
+                this.syncCommentButton();
+                if (!this.closed && this.refreshButton) this.refreshButton.disabled = false;
+                if (!this.closed && comment) comment.disabled = false;
                 if (!updated && !this.closed) buttons.forEach((button, index) => { button.disabled = disabledStates[index]; });
             }
         }
 
         scheduleRecoveryRefresh() {
-            if (this.closed || !this.waitingForRecovery || this.recoveryTimer !== null) return;
+            if (this.closed || !this.waitingForRecovery || this.recoveryTimer !== null || !this.tabs.has('overview')) return;
+            const version = this.dataVersion;
             this.recoveryTimer = window.setTimeout(async () => {
                 this.recoveryTimer = null;
                 if (this.closed) return;
@@ -1034,10 +1129,12 @@
                     const params = {eventid: this.config.eventData.eventid, tab: 'overview'};
                     if (this.config.eventData.hostid) params.hostid = this.config.eventData.hostid;
                     const result = await this.fetchJson('problemanalist.tab.get', params);
+                    if (version !== this.dataVersion) return;
                     if (typeof result.body !== 'string' || !result.problem_actions) throw new Error('Invalid overview response');
                     // Refresh the existing panel without changing the tab the user is viewing.
                     this.panels.get('overview').innerHTML = result.body;
                     this.config.problemActions = result.problem_actions;
+                    this.syncCommentButton();
                     this.tabs.set('overview', {loaded: true, promise: null});
                     this.waitingForRecovery = !result.problem_actions.recoveryReady;
                     if (this.waitingForRecovery) {
@@ -1049,7 +1146,7 @@
                         ? result.problem_actions.closingLabel : result.problem_actions.updatedLabel;
                     this.scheduleLayout();
                 } catch (error) {
-                    if (this.closed) return;
+                    if (this.closed || version !== this.dataVersion) return;
                     const message = this.root.querySelector('[data-problem-action-message]');
                     if (message) message.textContent = this.config.problemActions.closingLabel + ' ' + error.message;
                     // A transient read failure must not lose tracking of an accepted manual close.
@@ -1068,12 +1165,16 @@
             if (this.layoutFrame !== null) window.cancelAnimationFrame(this.layoutFrame);
             this.layoutFrame = null;
             this.lifecycle.abort();
+            this.dialogue?.classList.remove('analist-problem-dialogue');
+            this.refreshButton?.remove();
+            this.commentButton?.remove();
             for (const controller of this.requests) controller.abort();
             this.requests.clear();
             if (window.jQuery) {
                 window.jQuery(this.root).find('*').addBack().off('.analistPatterns').stop(true, true);
             }
             this.tabs.clear();
+            this.historyRequests.clear();
             this.patternRenderer = null;
             AnalistProblemPopup.instances.delete(this);
         }

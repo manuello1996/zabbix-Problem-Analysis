@@ -28,17 +28,27 @@ class CControllerAnalistProblemPopup extends CController {
     protected function checkInput(): bool {
         $fields = [
             'eventid'       => 'required|id',
-            'tab'           => 'string|in overview,host,timeline,patterns,graphs,update',
+            'tab'           => 'string|in overview,host,timeline,patterns,graphs,update,history',
             'triggerid'     => 'id',
             'hostid'        => 'id',
             'hostname'      => 'string',
             'problem_name'  => 'string',
             'severity'      => 'int32',
             'clock'         => 'int32',
-            'acknowledged'  => 'int32'
+            'acknowledged'  => 'int32',
+            'itemid'        => 'id',
+            'before_clock'  => 'int32|ge 0',
+            'before_ns'     => 'int32|ge 0|le 999999999'
         ];
 
         $ret = $this->validateInput($fields);
+        if ($ret && $this->getInput('tab', 'overview') === 'history') {
+            $ret = $this->validateInput(array_replace($fields, [
+                'itemid' => 'required|id',
+                'before_clock' => 'required|int32|ge 0',
+                'before_ns' => 'required|int32|ge 0|le 999999999'
+            ]));
+        }
 
         if (!$ret) {
             $this->setResponse(
@@ -84,6 +94,11 @@ class CControllerAnalistProblemPopup extends CController {
             $this->setResponse((new CControllerResponseData(['main_block' => json_encode([
                 'error' => ['messages' => [_('Problem event not found or access denied.')]]
             ])]))->disableView());
+            return;
+        }
+
+        if ($tab === 'history') {
+            $this->getMoreHistory($event);
             return;
         }
 
@@ -134,6 +149,8 @@ class CControllerAnalistProblemPopup extends CController {
         }
 
         $can_acknowledge = $tab === 'overview' && $this->checkAccess(CRoleHelper::ACTIONS_ACKNOWLEDGE_PROBLEMS);
+        $can_comment = in_array($tab, ['overview', 'update'], true)
+            && $this->checkAccess(CRoleHelper::ACTIONS_ADD_PROBLEM_COMMENTS);
         $can_change_severity = false;
         $editable_triggers = [];
         if ($tab === 'overview' && $trigger
@@ -347,6 +364,7 @@ class CControllerAnalistProblemPopup extends CController {
             'tab' => $tab,
             'is_fragment' => $this->getAction() === 'problemanalist.tab.get',
             'can_acknowledge' => $can_acknowledge,
+            'can_comment' => $can_comment,
             'can_change_severity' => $can_change_severity,
             'can_close' => $can_close,
             'closing_pending' => $closing_pending,
@@ -558,6 +576,65 @@ class CControllerAnalistProblemPopup extends CController {
         $host['tags'] = $tags;
 
         return $host;
+    }
+
+    private function getMoreHistory(array $event): void {
+        $itemid = (string) $this->getInput('itemid');
+        $triggers = API::Trigger()->get([
+            'output' => ['triggerid'], 'triggerids' => $event['objectid'], 'selectItems' => ['itemid']
+        ]);
+        $itemids = array_map('strval', array_column($triggers[0]['items'] ?? [], 'itemid'));
+        $items = in_array($itemid, $itemids, true) ? API::Item()->get([
+            'output' => ['itemid', 'name', 'key_', 'value_type', 'units'],
+            'itemids' => [$itemid], 'monitored' => true, 'selectValueMap' => ['mappings']
+        ]) : [];
+        $item = $items ? $items[0] : null;
+        if (!$item || (int) $item['value_type'] === ITEM_VALUE_TYPE_BINARY) {
+            $this->setResponse((new CControllerResponseData(['main_block' => json_encode([
+                'error' => ['messages' => [_('Item history not found or access denied.')]]
+            ])]))->disableView());
+            return;
+        }
+
+        $clock = (int) $this->getInput('before_clock');
+        $ns = (int) $this->getInput('before_ns');
+        $older = [];
+        try {
+            $limit = 4;
+            // Read one extra value to decide whether another batch is available.
+            // Expand only when values at the cursor's second fill the query, preserving nanosecond order.
+            if ($clock > 0 || $ns > 0) {
+                do {
+                    $rows = API::History()->get([
+                        'output' => ['itemid', 'clock', 'ns', 'value'],
+                        'history' => (int) $item['value_type'], 'itemids' => [$itemid],
+                        'time_till' => $ns === 0 ? $clock - 1 : $clock,
+                        'sortfield' => ['clock', 'ns'], 'sortorder' => ZBX_SORT_DOWN, 'limit' => $limit
+                    ]);
+                    if (!is_array($rows)) throw new \RuntimeException('History lookup failed');
+                    $older = array_values(array_filter($rows, static function (array $row) use ($clock, $ns): bool {
+                        return (int) $row['clock'] < $clock
+                            || ((int) $row['clock'] === $clock && (int) $row['ns'] < $ns);
+                    }));
+                    $full = count($rows) === $limit;
+                    $limit *= 2;
+                } while (count($older) < 4 && $full);
+            }
+        }
+        catch (\Exception $exception) {
+            $this->setResponse((new CControllerResponseData(['main_block' => json_encode([
+                'error' => ['messages' => [_('Unable to load older values. Please retry.')]]
+            ])]))->disableView());
+            return;
+        }
+
+        $values = array_slice($older, 0, 3);
+        $last = $values ? $values[count($values) - 1] : null;
+        $this->setResponse(new CControllerResponseData([
+            'tab' => 'history', 'event' => $event, 'history_item' => $item, 'history_values' => $values,
+            'history_has_more' => count($older) > 3,
+            'history_cursor' => $last ? ['clock' => (int) $last['clock'], 'ns' => (int) $last['ns']] : null
+        ]));
     }
 
     private function getOperationalData(?array $trigger, array $event, array $trigger_items): array {

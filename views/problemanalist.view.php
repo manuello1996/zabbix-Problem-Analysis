@@ -5,6 +5,7 @@
 require_once dirname(__FILE__).'/../../../include/events.inc.php';
 require_once dirname(__FILE__).'/../../../include/actions.inc.php';
 require_once dirname(__FILE__).'/../../../include/users.inc.php';
+require_once dirname(__FILE__).'/../../../include/items.inc.php';
 $this->addJsFile('layout.mode.js');
 $this->addJsFile('gtlc.js');
 $this->addJsFile('class.calendar.js');
@@ -54,6 +55,7 @@ $severity = isset($event['severity']) ? (int) $event['severity'] : 0;
 $is_acknowledged = (int) ($event['acknowledged'] ?? EVENT_NOT_ACKNOWLEDGED) === (int) EVENT_ACKNOWLEDGED;
 $problem_actions = [
     'canAcknowledge' => (bool) ($data['can_acknowledge'] ?? false),
+    'canComment' => (bool) ($data['can_comment'] ?? false),
     'canClose' => (bool) ($data['can_close'] ?? false),
     'canChangeSeverity' => (bool) ($data['can_change_severity'] ?? false),
     'severity' => $severity,
@@ -72,12 +74,15 @@ $problem_actions = [
     'closingLabel' => _('Closing problem. Waiting for recovery time…'),
     'csrfTokenName' => CSRF_TOKEN_NAME,
     'csrfToken' => !empty($data['can_acknowledge']) || !empty($data['can_close']) || !empty($data['can_change_severity'])
+            || !empty($data['can_comment'])
         ? CCsrfTokenHelper::get('acknowledge') : '',
     'acknowledgeAction' => ZBX_PROBLEM_UPDATE_ACKNOWLEDGE,
     'unacknowledgeAction' => ZBX_PROBLEM_UPDATE_UNACKNOWLEDGE,
     'closeAction' => ZBX_PROBLEM_UPDATE_CLOSE,
     'selectedScope' => ZBX_ACKNOWLEDGE_SELECTED,
     'updatedLabel' => _('Event updated'),
+    'commentAddedLabel' => _('Comment added'),
+    'emptyCommentLabel' => _('Enter a comment.'),
     'refreshErrorLabel' => _('Event updated, but the details could not be refreshed. Please retry.')
 ];
 $severity_value = CSeverityHelper::makeSeverityCell($severity);
@@ -200,16 +205,39 @@ function createAnalistHistoryValue($value, array $item) {
     if (!array_key_exists('valuemap', $item) || !is_array($item['valuemap'])) {
         $item['valuemap'] = [];
     }
+    $item += ['units' => '', 'value_type' => ITEM_VALUE_TYPE_STR];
 
-    if ((int) ($item['value_type'] ?? -1) === ITEM_VALUE_TYPE_FLOAT && function_exists('formatFloat')) {
-        $value = formatFloat($value, ['decimals' => ZBX_UNITS_ROUNDOFF_UNSUFFIXED]);
+    $raw_value = (string) $value;
+    $formatted_value = formatHistoryValue($raw_value, $item, false);
+    $raw_suffix = ' ('.$raw_value.')';
+    // Native value maps may already end with the exact raw value in parentheses.
+    if ($formatted_value !== $raw_value && substr($formatted_value, -strlen($raw_suffix)) !== $raw_suffix) {
+        $formatted_value .= $raw_suffix;
     }
 
-    if (class_exists('CValueMapHelper')) {
-        $value = CValueMapHelper::applyValueMap((int) ($item['value_type'] ?? -1), $value, $item['valuemap']);
-    }
+    return new CPre(zbx_nl2br($formatted_value));
+}
 
-    return new CPre(zbx_nl2br((string) $value));
+function createAnalistHistoryRows(array $values, array $item): array {
+    $rows = [];
+    foreach ($values as $value) {
+        $clock = isset($value['clock']) && $value['clock'] !== null
+            ? zbx_date2str(DATE_TIME_FORMAT_SECONDS, (int) $value['clock']) : _('N/A');
+        $rows[] = (new CDiv([
+            (new CSpan($clock))->addClass('grey')->addClass('operational-history-clock'),
+            createAnalistHistoryValue($value['value'] ?? '', $item)->addClass('operational-history-data')
+        ]))->addClass('operational-history-value');
+    }
+    return $rows;
+}
+
+if ($active_tab === 'history') {
+    $rows = createAnalistHistoryRows($data['history_values'], $data['history_item']);
+    echo json_encode([
+        'body' => implode('', array_map(static function ($row) { return $row->toString(); }, $rows)),
+        'has_more' => $data['history_has_more'], 'cursor' => $data['history_cursor']
+    ]);
+    return;
 }
 
 function createOperationalDataSection(array $operational_data): CDiv {
@@ -230,7 +258,7 @@ function createOperationalDataSection(array $operational_data): CDiv {
     $table->addClass('operational-history-table');
     $table->setHeader([
         (new CColHeader(_('Item')))->addStyle('width: 30%;'),
-        (new CColHeader(_('Latest 3 Values')))->addStyle('width: 70%;')
+        (new CColHeader(_('Latest values')))->addStyle('width: 70%;')
     ]);
 
     if (!$history) {
@@ -243,32 +271,32 @@ function createOperationalDataSection(array $operational_data): CDiv {
     foreach ($history as $entry) {
         $item = $entry['item'] ?? [];
         $values = $entry['values'] ?? [];
-        $value_lines = [];
-
-        foreach ($values as $value) {
-            $clock = isset($value['clock']) && $value['clock'] !== null
-                ? zbx_date2str(DATE_TIME_FORMAT_SECONDS, (int) $value['clock'])
-                : _('N/A');
-
-            $value_lines[] = (new CDiv([
-                (new CSpan($clock))->addClass('grey')->addClass('operational-history-clock'),
-                createAnalistHistoryValue($value['value'] ?? '', $item)
-                    ->addClass('operational-history-data')
-            ]))->addClass('operational-history-value');
-        }
+        $value_lines = createAnalistHistoryRows($values, $item);
 
         if (!$value_lines) {
             $value_lines[] = new CSpan(_('No history values found'));
         }
 
-        $table->addRow([
+        $value_cell = (new CCol((new CDiv($value_lines))->setAttribute('data-history-values', '')))
+            ->addClass(ZBX_STYLE_WORDBREAK)->addStyle('width: 70%;');
+        $last = $values ? $values[count($values) - 1] : null;
+        if (!empty($item['itemid']) && isset($last['clock'])
+                && (int) ($item['value_type'] ?? -1) !== ITEM_VALUE_TYPE_BINARY) {
+            $value_cell->addItem((new CDiv([
+                (new CSpan())->setAttribute('data-history-message', '')->setAttribute('role', 'status')
+                    ->setAttribute('aria-live', 'polite'),
+                (new CButton(null, _('More')))->addClass('btn-alt')->setAttribute('data-history-more', '')
+                    ->setAttribute('data-before-clock', (int) $last['clock'])
+                    ->setAttribute('data-before-ns', (int) ($last['ns'] ?? 0))
+                    ->setAttribute('aria-label', _s('Load 3 more values for %1$s', $item['name'] ?? $item['itemid']))
+            ]))->addClass('operational-history-more'));
+        }
+        $table->addRow((new CRow([
             (new CCol($item['name'] ?? $item['key_'] ?? _('Unknown item')))
                 ->addClass(ZBX_STYLE_WORDBREAK)
                 ->addStyle('width: 30%;'),
-            (new CCol($value_lines))
-                ->addClass(ZBX_STYLE_WORDBREAK)
-                ->addStyle('width: 70%;')
-        ]);
+            $value_cell
+        ]))->setAttribute('data-history-item', $item['itemid'] ?? ''));
     }
 
     $section->addItem($table);
@@ -946,6 +974,21 @@ $update_div->addClass('update-tab');
 
 // The native collector includes all manual updates, recovery events and recovery alerts.
 if ($active_tab === 'update' && !empty($event['eventid'])) {
+    if ($problem_actions['canComment']) {
+        $comment_id = uniqid('analist-comment-');
+        $update_div->addItem((new CDiv([
+            new CLabel(_('Comment'), $comment_id),
+            (new CTextArea('message'))->setId($comment_id)->setRows(4)
+                ->setMaxlength(DB::getFieldLength('acknowledges', 'message'))
+                ->setAdaptiveWidth(ZBX_TEXTAREA_BIG_WIDTH)
+                ->setAttribute('aria-required', 'true')->setAttribute('data-problem-comment', ''),
+            (new CButton(null, _('Post comment')))->addClass('btn-alt')
+                ->setAttribute('data-problem-action', 'comment')
+        ]))->setId($comment_id.'-form')->addClass('analist-comment-form')
+            ->setAttribute('data-comment-form', '')->setAttribute('hidden', 'hidden'));
+        $update_div->addItem((new CTag('p', true))->setAttribute('data-comment-message', '')
+            ->setAttribute('role', 'status')->setAttribute('aria-live', 'polite'));
+    }
     $actions = getEventDetailsActions($event);
     $users = !empty($actions['userids']) ? API::User()->get([
         'output' => ['username', 'name', 'surname'],
@@ -987,7 +1030,9 @@ if ($active_tab !== 'overview' || !empty($data['is_fragment'])) {
     echo json_encode([
         'body' => $panels[$active_tab]->toString(),
         'pattern_data' => $pattern_data,
-        'problem_actions' => $active_tab === 'overview' ? $problem_actions : null
+        'problem_actions' => $active_tab === 'overview' ? $problem_actions : null,
+        'comment_actions' => $active_tab === 'update' ? array_intersect_key($problem_actions,
+            array_flip(['canComment', 'csrfTokenName', 'csrfToken'])) : null
     ]);
     return;
 }
@@ -1035,9 +1080,7 @@ $popup_config = [
         'matching' => _('Matching services'), 'matched' => _('Matches event tags'),
         'slas' => _('SLAs'),
         'current' => _('Service status and SLA values show current data, not the state at the event time.'),
-        'search' => _('Search services'), 'refresh' => _('Refresh services'),
-        'refreshService' => _('Refresh service'), 'refreshing' => _('Refreshing service…'),
-        'refreshed' => _('Service updated'), 'hierarchy' => _('Hierarchy path'),
+        'search' => _('Search services'), 'hierarchy' => _('Hierarchy path'),
         'details' => _('Service details'), 'rules' => _('Matching tag rules'), 'equals' => _('equals'), 'contains' => _('contains'),
         'tag' => _('Tag'), 'operator' => _('Operator'), 'value' => _('Value'),
         'related' => _('Related services'), 'context' => _('Hierarchy context'),
@@ -1072,12 +1115,20 @@ $popup_config = [
         TRIGGER_SEVERITY_DISASTER => CSeverityHelper::getName(TRIGGER_SEVERITY_DISASTER)
     ],
     'loadingLabel' => _('Loading...'), 'retryLabel' => _('Retry'),
+    'refreshLabel' => _('Refresh'),
+    'addCommentLabel' => _('Add comment'),
+    'noMoreHistoryLabel' => _('No more values'),
     'expandLabel' => _('Expand'), 'collapseLabel' => _('Collapse')
 ];
 $output = [
     'header' => _('Event Details').': '.$event['name'],
     'body' => (new CDiv($tabs))->setId($popup_id)->addClass('event-details-popup')->toString(),
-    'buttons' => null,
+    'buttons' => [[
+        'title' => _('Cancel'),
+        'class' => 'btn-alt js-cancel',
+        'cancel' => true,
+        'action' => 'return true;'
+    ]],
     'script_inline' => 'window.AnalistProblemPopup.mount('.json_encode($popup_config,
         JSON_HEX_TAG | JSON_HEX_AMP | JSON_HEX_APOS | JSON_HEX_QUOT).');'
 ];
