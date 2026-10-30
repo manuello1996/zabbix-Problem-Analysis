@@ -795,6 +795,11 @@
                     || this.config.problemActions.recoveryReady) return;
             this.waitingForRecovery = true;
             const panel = this.panels.get('overview');
+            const status = panel.querySelector('[data-problem-status]');
+            if (status) {
+                status.textContent = this.config.problemActions.closingStatusLabel;
+                status.className = 'color-warning';
+            }
             if (!panel.querySelector('[data-recovery-row]')) {
                 panel.querySelector('[data-age-row]')?.remove();
                 panel.querySelector('.analist-problem-detail-table tbody')

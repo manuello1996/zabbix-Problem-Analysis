@@ -40,13 +40,12 @@ if ($event_time !== '' && isset($event['eventid'])) {
 $event_time_value = $event_details_url !== null
     ? new CLink($event_time, $event_details_url)
     : ($event_time ?: 'N/A');
-$time_ago = isset($event['clock']) ? zbx_date2age($event['clock']) : '';
 $is_resolved = !empty($event['r_eventid']);
 $closing_pending = !$is_resolved && !empty($data['closing_pending']);
 $recovery_time = isset($event['recovery_clock'])
     ? zbx_date2str(DATE_TIME_FORMAT_SECONDS, (int) $event['recovery_clock'])
     : '';
-$problem_duration = isset($event['clock'])
+$problem_duration = isset($event['clock']) && (!$is_resolved || isset($event['recovery_clock']))
     ? zbx_date2age((int) $event['clock'], isset($event['recovery_clock']) ? (int) $event['recovery_clock'] : 0)
     : '';
 
@@ -66,12 +65,15 @@ $problem_actions = [
     'recoveryReady' => $is_resolved && isset($event['recovery_clock']),
     'closingPending' => $closing_pending,
     'pendingRecoveryRow' => (new CRow([
-        (new CCol(_('Recovery time')))->addClass('analist-detail-label'),
+        (new CColHeader(_('Recovery time')))->setAttribute('scope', 'row')
+            ->addClass('analist-detail-label')->addClass(ZBX_STYLE_GREY),
         (new CCol(_('Pending')))->addClass('analist-detail-value'),
-        (new CCol(_('Duration')))->addClass('analist-detail-label'),
+        (new CColHeader(_('Duration')))->setAttribute('scope', 'row')
+            ->addClass('analist-detail-label')->addClass(ZBX_STYLE_GREY),
         (new CCol(_('Pending')))->addClass('analist-detail-value')
     ]))->setAttribute('data-recovery-row', '')->toString(),
     'closingLabel' => _('Closing problem. Waiting for recovery time…'),
+    'closingStatusLabel' => _('Closing'),
     'csrfTokenName' => CSRF_TOKEN_NAME,
     'csrfToken' => !empty($data['can_acknowledge']) || !empty($data['can_close']) || !empty($data['can_change_severity'])
             || !empty($data['can_comment'])
@@ -102,13 +104,14 @@ if ($problem_actions['canChangeSeverity']) {
     ]))->addClass('analist-severity-control');
     $severity_value = CSeverityHelper::makeSeverityCell($severity, $severity_controls);
 }
+$severity_value->addClass('analist-detail-value');
 $acknowledgement_value = (new CDiv([
     (new CIcon(
         $is_acknowledged ? ZBX_ICON_CHECK : ZBX_ICON_UNCHECK,
         $is_acknowledged ? _('Acknowledged') : _('Unacknowledged')
     ))->addClass($is_acknowledged ? ZBX_STYLE_COLOR_POSITIVE : ZBX_STYLE_COLOR_NEGATIVE),
     new CSpan($is_acknowledged ? _('Acknowledged') : _('Unacknowledged'))
-]))->addClass('analist-detail-inline');
+]))->addClass('analist-detail-inline')->addClass('analist-problem-acknowledgement');
 if ($problem_actions['canAcknowledge']) {
     $acknowledgement_value->addItem((new CButton(null, $is_acknowledged ? _('Unacknowledge') : _('Acknowledge')))
         ->addClass('btn-alt')->setAttribute('data-problem-action', $is_acknowledged ? 'unacknowledge' : 'acknowledge'));
@@ -389,9 +392,10 @@ function createMonthlyComparisonSection(array $monthly_comparison): ?CDiv {
 
 
 if ($active_tab === 'overview') {
-// Problem details, aligned with the native Zabbix trigger/event details layout.
+// Event context and actions stay visible; expressions are available on demand.
 $details_label = static function (string $label): CCol {
-    return (new CCol($label))->addClass('analist-detail-label');
+    return (new CColHeader($label))->setAttribute('scope', 'row')
+        ->addClass('analist-detail-label')->addClass(ZBX_STYLE_GREY);
 };
 
 $details_value = static function ($value): CCol {
@@ -410,30 +414,45 @@ $problem_details_table
     ->addClass('analist-detail-table')
     ->addClass('analist-problem-detail-table');
 
-$problem_details_table->addRow([
-    $details_label(_('Event')),
-    $details_full_value($event['name'] ?? '')
-]);
-
-$problem_details_table->addRow([
-    $details_label(_('Time')),
-    $details_full_value($event_time_value)
-]);
-
-$problem_details_table->addRow([
-    $details_label(_('Severity')),
-    $severity_value,
-    $details_label(_('Acknowledged')),
-    $details_value($acknowledgement_value)
-]);
-
+$status_label = $is_resolved ? _('Resolved') : ($closing_pending ? _('Closing') : _('Problem'));
+$status_class = $is_resolved ? ZBX_STYLE_COLOR_POSITIVE
+    : ($closing_pending ? ZBX_STYLE_COLOR_WARNING : ZBX_STYLE_COLOR_NEGATIVE);
+$status_value = (new CDiv([
+    (new CSpan($status_label))->addClass($status_class)->setAttribute('data-problem-status', '')
+]))->addClass('analist-detail-inline')->addClass('analist-problem-status');
 if ($problem_actions['canClose']) {
-    $problem_details_table->addRow([
-        $details_label(_('Close problem')),
-        $details_full_value((new CButton(null, _('Close problem')))->addClass('btn-alt')
-            ->setAttribute('data-problem-action', 'close'))
-    ]);
+    $status_value->addItem((new CButton(null, _('Close problem')))->addClass('btn-alt')
+        ->setAttribute('data-problem-action', 'close'));
 }
+$problem_details_table->addRow([
+    $details_label(_('Status')), $details_value($status_value),
+    $details_label(_('Severity')), $severity_value
+]);
+
+$detail_hosts = $trigger['hosts'] ?? ($host ? [$host] : []);
+$host_summaries = [];
+foreach ($detail_hosts as $detail_host) {
+    $visible_name = ($detail_host['name'] ?? '') !== ''
+        ? $detail_host['name'] : ($detail_host['host'] ?? _('Unknown'));
+    $host_summary = (new CDiv(new CSpan($visible_name)))->addClass('analist-host-summary');
+    $inventory_notes = (string) ($detail_host['inventory']['notes'] ?? '');
+    if (trim($inventory_notes) !== '') {
+        $host_summary->addItem((new CDiv($inventory_notes))
+            ->addClass('analist-host-notes')->addClass(ZBX_STYLE_GREY));
+    }
+    $host_summaries[] = $host_summary;
+}
+$problem_details_table->addRow([
+    $details_label(count($detail_hosts) > 1 ? _('Hosts') : _('Host')),
+    $details_value($host_summaries ?: _('Unknown')),
+    $details_label(_('Acknowledgement')), $details_value($acknowledgement_value)
+]);
+$problem_details_table->addRow([
+    $details_label(_('Started')), $details_value($event_time_value),
+    $details_label(_('Event ID')),
+    $details_value($event_details_url !== null
+        ? new CLink('#'.$event['eventid'], $event_details_url) : '#'.$event['eventid'])
+]);
 
 if ($is_resolved || $closing_pending) {
     $problem_details_table->addRow((new CRow([
@@ -445,8 +464,8 @@ if ($is_resolved || $closing_pending) {
 }
 else {
     $problem_details_table->addRow((new CRow([
-        $details_label(_('Age')),
-        $details_value($time_ago ?: 'N/A')
+        $details_label(_('Open for')),
+        $details_full_value($problem_duration ?: _('Unknown'))
     ]))->setAttribute('data-age-row', ''));
 }
 
@@ -455,27 +474,6 @@ if (!empty($event_tags[$event['eventid']])) {
     $problem_details_table->addRow([
         $details_label(_('Tags')),
         $details_full_value((new CDiv($event_tags[$event['eventid']]))->addClass(ZBX_STYLE_TAGS_WRAPPER))
-    ]);
-}
-
-if ($trigger && isset($trigger['comments']) && $trigger['comments'] !== '') {
-    $problem_details_table->addRow([
-        $details_label(_('Description')),
-        $details_full_value($trigger['comments'])
-    ]);
-}
-
-if ($trigger && isset($trigger['expression']) && $trigger['expression'] !== '') {
-    $problem_details_table->addRow([
-        $details_label(_('Problem expression')),
-        $details_full_value((new CDiv($trigger['expression']))->addClass(ZBX_STYLE_WORDBREAK))
-    ]);
-}
-
-if ($trigger && isset($trigger['recovery_expression']) && $trigger['recovery_expression'] !== '') {
-    $problem_details_table->addRow([
-        $details_label(_('Recovery expression')),
-        $details_full_value((new CDiv($trigger['recovery_expression']))->addClass(ZBX_STYLE_WORDBREAK))
     ]);
 }
 
@@ -489,11 +487,35 @@ $overview_container->addItem(createOperationalDataSection($operational_data));
 
 $problem_detail_section = new CDiv();
 $problem_detail_section->addClass('problem-detail-section');
-$problem_detail_section->addItem(new CTag('h4', false, _('Problem details')));
+$problem_detail_section->addItem(new CTag('h4', true, _('Problem details')));
 $problem_detail_section->addItem($problem_details_table);
-$overview_container->addItem($problem_detail_section);
-$overview_container->addItem((new CDiv())->setAttribute('data-problem-action-message', '')
+$problem_detail_section->addItem((new CDiv())->setAttribute('data-problem-action-message', '')
     ->setAttribute('role', 'status')->setAttribute('aria-live', 'polite'));
+if ($trigger && ($trigger['comments'] ?? '') !== '') {
+    $problem_detail_section->addItem((new CDiv([
+        new CTag('h5', true, _('Description')),
+        (new CDiv($trigger['comments']))->addClass('analist-problem-description')
+    ]))->addClass('analist-problem-notes'));
+}
+if ($trigger) {
+    $technical_table = (new CTableInfo())->addClass('analist-technical-table');
+    if (isset($trigger['triggerid'])) {
+        $technical_table->addRow([$details_label(_('Trigger ID')), $details_value($trigger['triggerid'])]);
+    }
+    foreach (['expression' => _('Problem expression'), 'recovery_expression' => _('Recovery expression')] as $key => $label) {
+        if (($trigger[$key] ?? '') !== '') {
+            $technical_table->addRow([
+                $details_label($label),
+                $details_value((new CPre($trigger[$key]))->addClass('analist-trigger-expression'))
+            ]);
+        }
+    }
+    $problem_detail_section->addItem((new CSectionCollapsible($technical_table))
+        ->setId(uniqid('analist-technical-'.$event['eventid'].'-'))
+        ->setHeader(new CTag('h4', true, _('Technical details')))->setExpanded(false)
+        ->addClass('analist-problem-technical'));
+}
+$overview_container->addItem($problem_detail_section);
 
 }
 $overview_container = $overview_container ?? new CDiv();

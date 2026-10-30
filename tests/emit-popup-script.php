@@ -25,7 +25,9 @@ class CSeverityHelper {
         return [ZBX_STYLE_STATUS_NA_BG, ZBX_STYLE_STATUS_INFO_BG, ZBX_STYLE_STATUS_WARNING_BG,
             ZBX_STYLE_STATUS_AVERAGE_BG, ZBX_STYLE_STATUS_HIGH_BG, ZBX_STYLE_STATUS_DISASTER_BG][$severity] ?? null;
     }
-    public static function makeSeverityCell($severity, $text = null) { return new CCol($text ?? self::getName($severity)); }
+    public static function makeSeverityCell($severity, $text = null, $force_normal = false, $return_as_div = false) {
+        return $return_as_div ? new CDiv($text ?? self::getName($severity)) : new CCol($text ?? self::getName($severity));
+    }
 }
 class CWebUser {
     public static $data = ['lang' => 'en_US'];
@@ -61,6 +63,22 @@ if ($scenario === 'recovered') {
     $event['r_eventid'] = '2';
     $event['recovery_clock'] = $event['clock'] + 120;
 }
+if ($scenario === 'recovery-unavailable') $event['r_eventid'] = '2';
+$trigger = null;
+if ($scenario === 'details') {
+    $trigger = [
+        'triggerid' => '7',
+        'hosts' => [
+            ['hostid' => '1', 'host' => 'technical-primary', 'name' => 'API <primary>',
+                'inventory' => ['notes' => "Rack <one>\n<script>alert(1)</script>"]],
+            ['hostid' => '2', 'host' => 'technical-secondary', 'name' => 'API secondary', 'inventory' => ['notes' => '']]
+        ],
+        'comments' => "Investigate <service>\nEscalate if needed.",
+        'expression' => 'last(/API/custom.metric)<5',
+        'recovery_expression' => 'last(/API/custom.metric)>10'
+    ];
+    $event['tags'] = [['tag' => 'service', 'value' => '<API>']];
+}
 $history_item = ['itemid' => '10', 'name' => 'Example <item>', 'value_type' => ITEM_VALUE_TYPE_TEXT];
 $history_values = array_map(static function ($clock) {
     return ['clock' => $clock, 'ns' => 0, 'value' => '<script> & "quoted"'];
@@ -86,7 +104,7 @@ if ($scenario === 'graphs-before') {
 }
 $view = new CView('problemanalist.view', [
     'tab' => $argv[1] ?? 'overview', 'event' => $event,
-    'host' => ($argv[1] ?? 'overview') === 'host' ? null : $host, 'trigger' => null,
+    'host' => ($argv[1] ?? 'overview') === 'host' ? null : $host, 'trigger' => $trigger,
     'is_fragment' => $scenario === 'fragment',
     'closing_pending' => $scenario === 'closing',
     'can_acknowledge' => in_array($scenario, ['permitted', 'acknowledged', 'ack-only']),

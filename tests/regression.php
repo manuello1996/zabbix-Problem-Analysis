@@ -69,7 +69,14 @@ class ApiFixture {
                     return ($b['clock'] <=> $a['clock']) ?: ($b['ns'] <=> $a['ns']);
                 });
                 return array_slice($rows, 0, $options['limit']);
-            case 'host': throw new HostSelectionProbe((string) $options['hostids']);
+            case 'host':
+                if (($options['selectInventory'] ?? []) === ['notes']) {
+                    $hosts = array_filter(API::$hosts, static function ($host) use ($options) {
+                        return in_array((string) $host['hostid'], array_map('strval', (array) $options['hostids']), true);
+                    });
+                    return array_column($hosts, null, 'hostid');
+                }
+                throw new HostSelectionProbe((string) $options['hostids']);
             case 'sla':
                 if (API::$slas instanceof Exception) throw API::$slas;
                 return API::$slas;
@@ -94,6 +101,7 @@ class ApiFixture {
 class API {
     public static $event = [];
     public static $trigger = null;
+    public static $hosts = [];
     public static $editable = true;
     public static $services = [];
     public static $calls = [];
@@ -323,6 +331,24 @@ API::$trigger['manual_close'] = ZBX_TRIGGER_MANUAL_CLOSE_NOT_ALLOWED;
 check(!$overview()['can_close'], 'Trigger manual-close setting must be respected');
 
 API::$trigger = ['triggerid' => '7', 'hosts' => [['hostid' => '11'], ['hostid' => '12']]];
+API::$hosts = [
+    ['hostid' => '11', 'name' => 'Visible primary', 'inventory' => ['notes' => "Rack 1\nOwner: Operations"]],
+    ['hostid' => '12', 'name' => 'Visible secondary', 'inventory' => []],
+    ['hostid' => '88', 'name' => 'Unrelated', 'inventory' => ['notes' => 'Must not be selected']]
+];
+API::$calls = [];
+$controller = new ProblemControllerFixture(['eventid' => '1', 'hostid' => '88']);
+$controller->run();
+$host_data = $controller->response->getData();
+$host_queries = array_values(array_filter(API::$calls, static function ($call) { return $call[0] === 'host'; }));
+check(count($host_queries) === 1 && $host_queries[0][1]['hostids'] === ['11', '12'],
+    'Overview batches inventory lookup for event trigger hosts only');
+check($host_queries[0][1]['output'] === ['hostid', 'name'] && $host_queries[0][1]['selectInventory'] === ['notes'],
+    'Overview requests only visible names and inventory notes');
+check($host_data['trigger']['hosts'][0]['inventory']['notes'] === "Rack 1\nOwner: Operations"
+    && $host_data['host']['name'] === 'Visible primary', 'Notes and visible names stay attached to the matching host');
+API::$hosts = [];
+check(!isset($overview()['trigger']['hosts'][0]['inventory']), 'Unavailable inventory must not prevent Overview rendering');
 foreach (['88' => '11', '12' => '12'] as $requested => $expected) {
     try {
         (new ProblemControllerFixture(['eventid' => '1', 'tab' => 'host', 'hostid' => (string) $requested]))->run();

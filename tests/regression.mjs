@@ -15,6 +15,9 @@ export async function runRegression(fixture, asset, popupAsset, fragments = {}, 
     vm.runInContext(inline, context);
     assert.equal(config.eventData.hostname, fixture.host.name);
     assert.equal(config.eventData.problem_name, fixture.event.name);
+    assert(fixture.response.body.includes('data-problem-status="">Problem</span>'));
+    assert(fixture.response.body.includes('>Started</th>') && fixture.response.body.includes('>Event ID</th>'));
+    assert(fixture.response.body.includes('>#1</a>'), 'The event reference links to native event details');
     assert(!fixture.response.body.includes('chart.php'), 'Graphs must not load in the initial popup');
     assert(!fixture.response.body.includes('Monthly Comparison'), 'Comparison belongs only to Timeline');
     const cancelButton = fixture.response.buttons.at(-1);
@@ -129,12 +132,37 @@ export async function runRegression(fixture, asset, popupAsset, fragments = {}, 
     }
     if (actionFixtures.recovered) {
         assert(actionFixtures.recovered.response.body.includes('Recovery time'));
+        assert(actionFixtures.recovered.response.body.includes('data-problem-status="">Resolved</span>'));
         assert(!actionFixtures.recovered.response.body.includes('data-problem-action="close"'));
     }
     if (actionFixtures.closing) {
         assert(actionFixtures.closing.response.body.includes('Recovery time'));
+        assert(actionFixtures.closing.response.body.includes('data-problem-status="">Closing</span>'));
         assert(actionFixtures.closing.response.body.includes('Pending'));
         assert(!actionFixtures.closing.response.body.includes('data-problem-action="close"'));
+    }
+    if (actionFixtures['recovery-unavailable']) {
+        const body = actionFixtures['recovery-unavailable'].response.body;
+        assert(body.includes('data-problem-status="">Resolved</span>'));
+        const recoveryRow = body.match(/<tr[^>]*data-recovery-row=""[^>]*>(.*?)<\/tr>/s)?.[1];
+        assert(recoveryRow && (recoveryRow.match(/>Unknown<\/td>/g) || []).length === 2,
+            'An unavailable recovery timestamp must not show a duration that continues growing after resolution');
+    }
+    if (actionFixtures.details) {
+        const body = actionFixtures.details.response.body;
+        assert(body.includes('API &lt;primary&gt;') && body.includes('API secondary'),
+            'The event context includes the visible name of every trigger host');
+        assert(!body.includes('technical-primary') && !body.includes('technical-secondary'));
+        assert(body.includes('Rack &lt;one&gt;\n&lt;script&gt;alert(1)&lt;/script&gt;') && !body.includes('<script>'),
+            'Inventory notes remain escaped and multiline');
+        assert.equal((body.match(/class="analist-host-notes grey"/g) || []).length, 1,
+            'Empty inventory notes do not add a blank line');
+        assert(body.includes('Investigate &lt;service&gt;\nEscalate if needed.'), 'Description text remains escaped and multiline');
+        assert(body.includes('service: &lt;API&gt;'), 'Native event tags remain available and escaped');
+        assert(body.includes('analist-problem-technical collapsed') && body.includes('Technical details') && body.includes('toggleSection('),
+            'Expressions use a collapsed native section');
+        assert(body.includes('last(/API/custom.metric)&lt;5') && body.includes('last(/API/custom.metric)&gt;10'));
+        assert(body.indexOf('Technical details') > body.indexOf('Description'));
     }
     for (const scenario of ['permitted', 'readonly', 'comment-only']) {
         const rendered = actionFixtures['update-' + scenario];
@@ -467,11 +495,13 @@ export async function runRegression(fixture, asset, popupAsset, fragments = {}, 
     let pendingInsertions = 0;
     let ageRemoved = false;
     let overviewMarkup = '';
+    const closingStatus = {textContent: 'Problem', className: 'color-negative'};
     Object.defineProperty(overviewD, 'innerHTML', {
         get() { return overviewMarkup; },
         set(value) { overviewMarkup = value; pendingRow = ''; }
     });
     overviewD.querySelector = selector => {
+        if (selector === '[data-problem-status]') return closingStatus;
         if (selector === '[data-recovery-row]') return pendingRow ? {} : null;
         if (selector === '[data-age-row]') return {remove() { ageRemoved = true; }};
         if (selector === '.analist-problem-detail-table tbody') return {
@@ -488,6 +518,8 @@ export async function runRegression(fixture, asset, popupAsset, fragments = {}, 
     assert.equal(recoveryTimers.size, 1, 'Accepted close must track asynchronous recovery');
     assert(ageRemoved && pendingRow.includes('Recovery time') && pendingRow.includes('Pending'),
         'An accepted close immediately displays a pending Recovery time row');
+    assert.equal(closingStatus.textContent, 'Closing');
+    assert.equal(closingStatus.className, 'color-warning');
     const nextRecovery = () => {
         const [id, callback] = recoveryTimers.entries().next().value;
         recoveryTimers.delete(id); return callback();
@@ -888,7 +920,8 @@ if (typeof process !== 'undefined' && process.argv[1] && path.resolve(process.ar
         return JSON.parse(result.stdout);
     }
     const fragments = Object.fromEntries(['host', 'timeline', 'patterns', 'graphs', 'update'].map(tab => [tab, render(tab)]));
-    const actionFixtures = Object.fromEntries(['readonly', 'permitted', 'acknowledged', 'ack-only', 'fragment', 'recovered', 'closing']
+    const actionFixtures = Object.fromEntries(['readonly', 'permitted', 'acknowledged', 'ack-only', 'fragment', 'recovered', 'closing',
+        'details', 'recovery-unavailable']
         .map(scenario => [scenario, render('overview', scenario)]));
     for (const scenario of ['permitted', 'readonly', 'comment-only']) {
         actionFixtures['update-' + scenario] = render('update', scenario);

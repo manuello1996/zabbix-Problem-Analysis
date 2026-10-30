@@ -104,6 +104,7 @@
 .analist-detail-inline {
     display: inline-flex;
     align-items: center;
+    flex-wrap: wrap;
     gap: 6px;
 }
 
@@ -111,34 +112,101 @@
     line-height: 1;
 }
 
-.problem-detail-section h4 {
-    color: #5f7894;
-    font-size: 13px;
-    font-weight: normal;
-    line-height: 18px;
-}
-
 .analist-problem-detail-table {
     table-layout: fixed;
 }
 
-.analist-problem-detail-table td {
+.analist-problem-detail-table td,
+.analist-problem-detail-table th[scope='row'] {
     font-size: 13px;
     line-height: 18px;
-    padding-top: 6px;
-    padding-bottom: 6px;
-    vertical-align: top;
+    padding-top: 8px;
+    padding-bottom: 8px;
+    vertical-align: middle;
+    white-space: normal;
+    overflow-wrap: anywhere;
 }
 
 .analist-problem-detail-table .analist-detail-label {
-    width: 11%;
-    white-space: nowrap;
-    color: #5f7894;
+    width: 14%;
     font-weight: normal;
 }
 
 .analist-problem-detail-table .analist-detail-value {
-    width: 39%;
+    width: 36%;
+}
+
+.event-details-popup .analist-problem-detail-table .tags-wrapper {
+    width: 100%;
+    max-width: none;
+}
+
+.event-details-popup [data-problem-status] {
+    font-weight: 600;
+}
+.event-details-popup .analist-problem-status,
+.event-details-popup .analist-problem-acknowledgement {
+    display: flex;
+}
+.event-details-popup .analist-problem-status [data-problem-action='close'],
+.event-details-popup .analist-problem-acknowledgement [data-problem-action] {
+    margin-left: auto;
+}
+.event-details-popup .analist-host-summary + .analist-host-summary {
+    margin-top: 8px;
+}
+.event-details-popup .analist-host-notes {
+    margin-top: 3px;
+    font-size: 12px;
+    line-height: 1.4;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+}
+.event-details-popup .analist-problem-notes,
+.event-details-popup .analist-problem-technical {
+    margin-top: 16px;
+}
+.event-details-popup .analist-problem-notes h5 {
+    margin: 0 0 6px;
+}
+.event-details-popup .analist-problem-description,
+.event-details-popup .analist-trigger-expression {
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+    line-height: 1.5;
+}
+.event-details-popup .analist-trigger-expression {
+    margin: 0;
+}
+.event-details-popup .analist-technical-table {
+    table-layout: fixed;
+}
+.event-details-popup .analist-technical-table .analist-detail-label {
+    width: 180px;
+    font-weight: normal;
+    white-space: normal;
+    vertical-align: top;
+}
+.event-details-popup .analist-problem-technical .section-head h4 {
+    margin: 0;
+}
+.event-details-popup [data-problem-action-message]:not(:empty) {
+    margin-top: 12px;
+}
+@media (max-width: 900px) {
+    .event-details-popup .analist-problem-detail-table,
+    .event-details-popup .analist-problem-detail-table tbody {
+        display: block;
+    }
+    .event-details-popup .analist-problem-detail-table tr {
+        display: grid;
+        grid-template-columns: minmax(100px, 1fr) minmax(0, 3fr);
+    }
+    .event-details-popup .analist-problem-detail-table .analist-detail-label,
+    .event-details-popup .analist-problem-detail-table .analist-detail-value {
+        width: auto;
+        min-width: 0;
+    }
 }
 
 /* Estilos para o botão LTS */
@@ -1066,6 +1134,7 @@ td:has(.js-lts-button-widget) {
 .event-details-popup .analist-severity-arrows {
     display: inline-flex;
     align-items: center;
+    flex-shrink: 0;
     gap: 2px;
 }
 .event-details-popup .analist-severity-arrows .btn-icon {

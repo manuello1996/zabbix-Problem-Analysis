@@ -197,6 +197,21 @@ class CControllerAnalistProblemPopup extends CController {
             }
         }
 
+        // Overview needs only visible names and inventory notes for this trigger's hosts.
+        if ($tab === 'overview' && !empty($trigger['hosts'])) {
+            $overview_hosts = API::Host()->get([
+                'output' => ['hostid', 'name'],
+                'hostids' => array_column($trigger['hosts'], 'hostid'),
+                'selectInventory' => ['notes'],
+                'preservekeys' => true
+            ]);
+            foreach ($trigger['hosts'] as $index => $trigger_host) {
+                if (isset($overview_hosts[$trigger_host['hostid']])) {
+                    $trigger['hosts'][$index] = array_replace($trigger_host, $overview_hosts[$trigger_host['hostid']]);
+                }
+            }
+        }
+
         // Get host details with comprehensive data for hostcard
         $host = null;
         $actual_hostid = 0;
