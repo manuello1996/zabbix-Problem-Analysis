@@ -11,7 +11,8 @@ $DB = ['TYPE' => ZBX_DB_POSTGRESQL];
 require $ui_root.'/include/classes/core/CAutoloader.php';
 $autoloader = new CAutoloader();
 $autoloader->addNamespace('', [$ui_root.'/include/classes/html', $ui_root.'/include/classes/core',
-    $ui_root.'/include/classes/html/interfaces', $ui_root.'/include/classes/helpers', $ui_root.'/include/classes/parsers', $ui_root.'/include/classes/validators']);
+    $ui_root.'/include/classes/html/interfaces', $ui_root.'/include/classes/helpers', $ui_root.'/include/classes/parsers',
+    $ui_root.'/include/classes/validators', $ui_root.'/include/classes/mvc']);
 $autoloader->register();
 set_error_handler(static function ($severity, $message, $file, $line) {
     throw new ErrorException($message, 0, $severity, $file, $line);
@@ -32,7 +33,8 @@ class CWebUser {
 }
 class CSettingsHelper {
     public const SEARCH_LIMIT = 'search_limit';
-    public static function get($name) { return 100; }
+    public const PERIOD_DEFAULT = 'period_default';
+    public static function get($name) { return $name === self::PERIOD_DEFAULT ? '1d' : 100; }
 }
 class CCsrfTokenHelper {
     public static function get($action) { return 'fixture-csrf-'.$action; }
@@ -47,14 +49,7 @@ class API {
     public static function User() { return new ViewApiFixture(); }
     public static function Mediatype() { return new ViewApiFixture(); }
 }
-class ViewFixture {
-    public function addJsFile($file) {}
-    public function render($data) {
-        ob_start();
-        include dirname(__DIR__).'/views/problemanalist.view.php';
-        return json_decode(ob_get_clean(), true, 512, JSON_THROW_ON_ERROR);
-    }
-}
+CView::registerDirectory(dirname(__DIR__).'/views');
 date_default_timezone_set('Europe/Zurich');
 $event = ['eventid' => '1', 'name' => "Quoted \"event\" \n </script>", 'severity' => 2,
     'clock' => strtotime('2026-03-31 12:00:00'), 'objectid' => '7', 'source' => 0, 'object' => 0,
@@ -70,7 +65,26 @@ $history_item = ['itemid' => '10', 'name' => 'Example <item>', 'value_type' => I
 $history_values = array_map(static function ($clock) {
     return ['clock' => $clock, 'ns' => 0, 'value' => '<script> & "quoted"'];
 }, [100, 90, 80]);
-$response = (new ViewFixture())->render([
+$graph_items = [['itemid' => '1', 'name' => 'Fixture <metric>', 'units' => 'bps', 'value_type' => ITEM_VALUE_TYPE_UINT64]];
+if (in_array($scenario, ['graphs-many', 'graphs-combined'])) {
+    $graph_items[] = ['itemid' => '2', 'name' => 'Second metric', 'units' => 'B', 'value_type' => ITEM_VALUE_TYPE_UINT64];
+}
+if ($scenario === 'graphs-empty') $graph_items = [];
+$graph_timeline = [
+    'period' => $scenario === 'graphs-custom' ? 'custom' : 'around',
+    'from' => date(ZBX_FULL_DATE_TIME, $event['clock'] - SEC_PER_HOUR),
+    'to' => date(ZBX_FULL_DATE_TIME, $event['clock'] + SEC_PER_HOUR),
+    'from_ts' => $event['clock'] - SEC_PER_HOUR, 'to_ts' => $event['clock'] + SEC_PER_HOUR
+];
+if ($scenario === 'graphs-before') {
+    $graph_timeline = [
+        'period' => 'before',
+        'from' => date(ZBX_FULL_DATE_TIME, $event['clock'] - 6 * SEC_PER_HOUR),
+        'to' => date(ZBX_FULL_DATE_TIME, $event['clock']),
+        'from_ts' => $event['clock'] - 6 * SEC_PER_HOUR, 'to_ts' => $event['clock']
+    ];
+}
+$view = new CView('problemanalist.view', [
     'tab' => $argv[1] ?? 'overview', 'event' => $event,
     'host' => ($argv[1] ?? 'overview') === 'host' ? null : $host, 'trigger' => null,
     'is_fragment' => $scenario === 'fragment',
@@ -84,7 +98,23 @@ $response = (new ViewFixture())->render([
         ? [['item' => $history_item, 'values' => $history_values]] : []],
     'history_item' => $history_item, 'history_values' => $history_values, 'history_has_more' => true,
     'history_cursor' => ['clock' => 80, 'ns' => 0],
-    'items' => [['itemid' => '1', 'name' => 'Fixture metric']],
+    'items' => $graph_items,
+    'graph_timeline' => $graph_timeline,
+    'graph_layout' => $scenario === 'graphs-combined' ? 'combined' : 'items',
     'monthly_comparison' => ['months' => [['name' => 'March 2026', 'count' => 1, 'change_percentage' => 0]]]
 ]);
-echo json_encode(['inline' => $response['script_inline'] ?? '', 'response' => $response, 'event' => $event, 'host' => $host]);
+$response = json_decode($view->getOutput(), true, 512, JSON_THROW_ON_ERROR);
+// Resolve the actual emitted image URLs using the same native helper as chart.php.
+$chart_periods = [];
+if (($argv[1] ?? 'overview') === 'graphs') {
+    preg_match_all('/<img[^>]+src="([^"]+)"/', $response['body'], $matches);
+    foreach ($matches[1] as $src) {
+        parse_str(parse_url(html_entity_decode($src, ENT_QUOTES | ENT_HTML5, 'UTF-8'), PHP_URL_QUERY), $params);
+        $chart_periods[] = getTimeSelectorPeriod([
+            'profileIdx' => $params['profileIdx'] ?? null, 'profileIdx2' => $params['profileIdx2'] ?? null,
+            'from' => $params['from'] ?? null, 'to' => $params['to'] ?? null
+        ]);
+    }
+}
+echo json_encode(['inline' => $response['script_inline'] ?? '', 'response' => $response, 'event' => $event, 'host' => $host,
+    'graph_timeline' => $graph_timeline, 'chart_periods' => $chart_periods]);

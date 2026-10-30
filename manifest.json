@@ -24,7 +24,6 @@
     },
     "assets": {
         "js": [
-            "analist-popup.js",
             "analist-problem.js"
         ],
         "css": [

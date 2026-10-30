@@ -14,6 +14,9 @@ use CMacrosResolverHelper;
 use CSettingsHelper;
 use CSeverityHelper;
 use CRoleHelper;
+use CRangeTimeParser;
+use CParser;
+use CTimePeriodHelper;
 use Manager;
 
 /**
@@ -38,7 +41,11 @@ class CControllerAnalistProblemPopup extends CController {
             'acknowledged'  => 'int32',
             'itemid'        => 'id',
             'before_clock'  => 'int32|ge 0',
-            'before_ns'     => 'int32|ge 0|le 999999999'
+            'before_ns'     => 'int32|ge 0|le 999999999',
+            'graph_period'  => 'in around,before,duration,day,custom',
+            'graph_layout'  => 'in items,combined',
+            'graph_from'    => 'range_time',
+            'graph_to'      => 'range_time'
         ];
 
         $ret = $this->validateInput($fields);
@@ -47,6 +54,12 @@ class CControllerAnalistProblemPopup extends CController {
                 'itemid' => 'required|id',
                 'before_clock' => 'required|int32|ge 0',
                 'before_ns' => 'required|int32|ge 0|le 999999999'
+            ]));
+        }
+        if ($ret && $this->getInput('tab', 'overview') === 'graphs'
+                && $this->getInput('graph_period', 'around') === 'custom') {
+            $ret = $this->validateInput(array_replace($fields, [
+                'graph_from' => 'required|range_time', 'graph_to' => 'required|range_time'
             ]));
         }
 
@@ -359,6 +372,19 @@ class CControllerAnalistProblemPopup extends CController {
             ? $this->getOperationalData($trigger, $event, $trigger_items)
             : ['value' => '', 'history' => []];
 
+        $graph_timeline = null;
+        if ($tab === 'graphs') {
+            try {
+                $graph_timeline = $this->getGraphTimeline($event);
+            }
+            catch (\Exception $exception) {
+                $this->setResponse((new CControllerResponseData(['main_block' => json_encode([
+                    'error' => ['messages' => [$exception->getMessage()]]
+                ])]))->disableView());
+                return;
+            }
+        }
+
         // Prepare data for view
         $data = [
             'tab' => $tab,
@@ -375,6 +401,8 @@ class CControllerAnalistProblemPopup extends CController {
             'items' => $items,
             'monthly_comparison' => $monthly_comparison,
             'operational_data' => $operational_data,
+            'graph_timeline' => $graph_timeline,
+            'graph_layout' => $this->getInput('graph_layout', 'items'),
             'user' => [
                 'debug_mode' => $this->getDebugMode()
             ]
@@ -576,6 +604,47 @@ class CControllerAnalistProblemPopup extends CController {
         $host['tags'] = $tags;
 
         return $host;
+    }
+
+    private function getGraphTimeline(array $event): array {
+        $period = $this->getInput('graph_period', 'around');
+        $event_clock = (int) $event['clock'];
+        $now = time();
+        switch ($period) {
+            case 'custom':
+                $from = $this->getInput('graph_from');
+                $to = $this->getInput('graph_to');
+                break;
+            case 'before':
+                $from = date(ZBX_FULL_DATE_TIME, max(0, $event_clock - 6 * SEC_PER_HOUR));
+                $to = date(ZBX_FULL_DATE_TIME, $event_clock);
+                break;
+            case 'duration':
+                $end = (int) ($event['recovery_clock'] ?? $now);
+                $from = date(ZBX_FULL_DATE_TIME, max(0, min($event_clock, $end - ZBX_MIN_PERIOD)));
+                $to = date(ZBX_FULL_DATE_TIME, $end);
+                break;
+            case 'day':
+                $from = 'now-1d';
+                $to = 'now';
+                break;
+            default:
+                $from = date(ZBX_FULL_DATE_TIME, max(0, $event_clock - SEC_PER_HOUR));
+                $to = date(ZBX_FULL_DATE_TIME, min($now, $event_clock + SEC_PER_HOUR));
+        }
+        $parser = new CRangeTimeParser();
+        if ($parser->parse($from) !== CParser::PARSE_SUCCESS) throw new \RuntimeException(_('Invalid start time.'));
+        $from_ts = $parser->getDateTime(true)->getTimestamp();
+        if ($parser->parse($to) !== CParser::PARSE_SUCCESS) throw new \RuntimeException(_('Invalid end time.'));
+        $to_ts = $parser->getDateTime(false)->getTimestamp();
+        $duration = $to_ts - $from_ts + 1;
+        if ($duration < CTimePeriodHelper::getMinPeriod()) {
+            throw new \RuntimeException(_('The selected period is too short or the end time precedes the start time.'));
+        }
+        if ($duration > CTimePeriodHelper::getMaxPeriod()) {
+            throw new \RuntimeException(_('The selected period exceeds the maximum time period configured in Zabbix.'));
+        }
+        return compact('period', 'from', 'to', 'from_ts', 'to_ts');
     }
 
     private function getMoreHistory(array $event): void {

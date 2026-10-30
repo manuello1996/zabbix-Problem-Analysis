@@ -707,10 +707,24 @@
             this.dataVersion = 0;
             this.refreshPromise = null;
             this.historyRequests = new Map();
+            this.graphOptions = {};
+            this.graphRequest = null;
             root.addEventListener('click', event => this.onClick(event), {signal: this.lifecycle.signal});
             root.addEventListener('keydown', event => this.onKeyDown(event), {signal: this.lifecycle.signal});
             root.addEventListener('input', event => {
                 if (event.target.matches('[data-services-search]')) this.serviceUi.filterServices(event.target.value);
+            }, {signal: this.lifecycle.signal});
+            root.addEventListener('change', event => {
+                if (!event.target.matches('[data-graph-period]')) return;
+                const range = event.target.closest('[data-graph-controls]')?.querySelector('[data-graph-custom-range]');
+                if (range) range.hidden = event.target.value !== 'custom';
+                this.scheduleLayout();
+            }, {signal: this.lifecycle.signal});
+            root.addEventListener('submit', event => {
+                if (!event.target.matches('[data-graph-controls]')) return;
+                event.preventDefault();
+                event.stopPropagation();
+                this.updateGraphs(event.target);
             }, {signal: this.lifecycle.signal});
             root.addEventListener('toggle', event => {
                 if (event.target.matches('details.service-card, details.analist-related-services')) this.scheduleLayout();
@@ -871,6 +885,8 @@
 
         invalidateTabs() {
             this.dataVersion++;
+            if (this.activeTab !== 'graphs') this.graphOptions = {};
+            this.graphRequest = null;
             if (this.recoveryTimer !== null) window.clearTimeout(this.recoveryTimer);
             this.recoveryTimer = null;
             for (const request of this.requests) request.abort();
@@ -921,6 +937,7 @@
                 params.tab = key;
                 if (this.config.eventData.hostid) params.hostid = this.config.eventData.hostid;
             }
+            if (key === 'graphs') Object.assign(params, this.graphOptions);
             state.promise = this.fetchJson(action, params).then(result => {
                 if (this.closed || this.tabs.get(key) !== state) return;
                 if (key === 'services') {
@@ -985,6 +1002,48 @@
             } finally {
                 this.requests.delete(controller);
             }
+        }
+
+        updateGraphs(form) {
+            if (this.closed || !this.root.contains(form)) return Promise.resolve();
+            if (this.graphRequest) return this.graphRequest;
+            const options = {
+                graph_period: form.querySelector('[name="graph_period"]').value,
+                graph_layout: form.querySelector('[name="graph_layout"]')?.value ?? 'items'
+            };
+            if (options.graph_period === 'custom') {
+                options.graph_from = form.querySelector('[data-graph-from] input').value;
+                options.graph_to = form.querySelector('[data-graph-to] input').value;
+            }
+            const version = this.dataVersion;
+            const state = this.tabs.get('graphs');
+            const submit = form.querySelector('[type="submit"]');
+            const message = form.querySelector('[data-graph-message]');
+            message.textContent = '';
+            submit.disabled = true;
+            form.setAttribute('aria-busy', 'true');
+            const request = this.fetchJson('problemanalist.tab.get', {
+                eventid: this.config.eventData.eventid, tab: 'graphs', ...options,
+                ...(this.config.eventData.hostid ? {hostid: this.config.eventData.hostid} : {})
+            }).then(result => {
+                if (this.closed || version !== this.dataVersion || this.tabs.get('graphs') !== state) return;
+                if (typeof result.body !== 'string') throw new Error('Invalid graph response');
+                this.panels.get('graphs').innerHTML = result.body;
+                this.graphOptions = options;
+                this.scheduleLayout();
+            }).catch(error => {
+                if (!this.closed && version === this.dataVersion && error.name !== 'AbortError'
+                        && this.root.contains(form)) message.textContent = error.message;
+            }).finally(() => {
+                if (this.graphRequest === request) this.graphRequest = null;
+                if (!this.closed && version === this.dataVersion && this.root.contains(form)) {
+                    submit.disabled = false;
+                    form.removeAttribute('aria-busy');
+                    this.scheduleLayout();
+                }
+            });
+            this.graphRequest = request;
+            return request;
         }
 
         loadMoreHistory(button) {
@@ -1175,6 +1234,8 @@
             }
             this.tabs.clear();
             this.historyRequests.clear();
+            this.graphRequest = null;
+            this.graphOptions = {};
             this.patternRenderer = null;
             AnalistProblemPopup.instances.delete(this);
         }

@@ -832,138 +832,89 @@ $time_patterns_div->addItem($patterns_container);
 $panels['patterns'] = $time_patterns_div;
 
 
-// TAB 5: Graphs - Fixed time period (1 hour before incident, and 12h before incident to now)
-$graphs_div = new CDiv();
+// TAB 5: Native chart rendering, selectors, calendars and collapsible graph sections.
+$graphs_div = (new CDiv())->addClass('analist-graphs');
 if ($active_tab === 'graphs') {
+    $timeline = $data['graph_timeline'];
+    $has_multiple_items = count($items) >= 2;
+    $graph_layout = $has_multiple_items ? ($data['graph_layout'] ?? 'items') : 'items';
+    $graph_id = uniqid('analist-graphs-');
+    $period = (new CSelect('graph_period'))->setId($graph_id.'-period')
+        ->setFocusableElementId($graph_id.'-period-focus')->setValue($timeline['period'])
+        ->setAttribute('data-graph-period', '')->addOptions(CSelect::createOptionsFromArray([
+            'around' => _('Around problem start'), 'before' => _('6 hours before problem'),
+            'duration' => _('Problem duration'), 'day' => _('Last 24 hours'), 'custom' => _('Custom period')
+        ]));
+    $graph_toolbar = (new CDiv([
+        new CLabel(_('Period'), $period->getFocusableElementId()), $period
+    ]))->addClass('analist-graph-toolbar');
+    if ($has_multiple_items) {
+        $layout = (new CSelect('graph_layout'))->setId($graph_id.'-layout')
+            ->setFocusableElementId($graph_id.'-layout-focus')->setValue($graph_layout)
+            ->addOptions(CSelect::createOptionsFromArray([
+                'items' => _('Individual graphs'), 'combined' => _('Combined graph')
+            ]));
+        $graph_toolbar->addItem([new CLabel(_('Display'), $layout->getFocusableElementId()), $layout]);
+    }
+    $graph_toolbar->addItem((new CSubmit('apply_graphs', _('Apply')))->setId($graph_id.'-apply'));
+    $custom_range = (new CDiv([
+        new CLabel(_('From'), $graph_id.'_from'),
+        (new CDateSelector($graph_id.'_from', $timeline['from']))->setDateFormat(ZBX_FULL_DATE_TIME)
+            ->setAriaRequired(true)->setAttribute('data-graph-from', ''),
+        new CLabel(_('To'), $graph_id.'_to'),
+        (new CDateSelector($graph_id.'_to', $timeline['to']))->setDateFormat(ZBX_FULL_DATE_TIME)
+            ->setAriaRequired(true)->setAttribute('data-graph-to', '')
+    ]))->addClass('analist-graph-custom-range')->setAttribute('data-graph-custom-range', '');
+    if ($timeline['period'] !== 'custom') $custom_range->setAttribute('hidden', 'hidden');
+    $graphs_div->addItem((new CForm('get', 'zabbix.php'))->setName($graph_id)
+        ->setAttribute('data-graph-controls', '')->addItem([
+            $graph_toolbar,
+            $custom_range,
+            (new CTag('p', true))->setAttribute('data-graph-message', '')->setAttribute('role', 'alert')
+        ]));
+    $graphs_div->addItem((new CTableInfo())->setHeader([_('Problem start'), _('Recovery time'), _('Displayed period')])
+        ->addRow([
+            $event_time,
+            $recovery_time ?: ($is_resolved ? _('Unknown') : _('Unresolved')),
+            zbx_date2str(DATE_TIME_FORMAT_SECONDS, $timeline['from_ts']).' – '
+                .zbx_date2str(DATE_TIME_FORMAT_SECONDS, $timeline['to_ts'])
+        ]));
 
-if ($items && isset($event['clock'])) {
-    // --- Fixed time windows relative to the incident
-    $event_ts    = (int)$event['clock'];
-    $from_6h_ts  = $event_ts - 21600;         // 6 hours before incident
-
-    // UI strings (respect user TZ + 24h settings)
-    $from_6h_ui  = zbx_date2str(DATE_TIME_FORMAT_SECONDS, $from_6h_ts);
-    $event_ui    = zbx_date2str(DATE_TIME_FORMAT_SECONDS, $event_ts);
-
-    // chart.php expects absolute datetime strings (server-side parsing)
-    $from_6h_param = date('Y-m-d H:i:s', $from_6h_ts);
-    $event_param   = date('Y-m-d H:i:s', $event_ts);
-    $to_now_param  = 'now';
-
-    // Create charts container
-    $charts_container = new CDiv();
-    $charts_container->addClass('charts-container');
-
-    // Period info: (1) 6h before → now, (2) incident → now
-    $period_info = new CDiv(sprintf(
-        '%s: %s → %s | %s: %s → %s',
-        _('6h window'), $from_6h_ui, $event_ui,
-        _('From incident'), $event_ui, _('now')
-    ));
-    $period_info->addClass('period-info');
-    $charts_container->addItem($period_info);
-
-    // Collect unique itemids and names
-    $processed_items = [];
-    $unique_itemids  = [];
-    $item_names      = [];
-
-    foreach ($items as $item) {
-        if (!isset($processed_items[$item['itemid']])) {
-            $processed_items[$item['itemid']] = true;
-            $unique_itemids[] = $item['itemid'];
-            $item_names[] = $item['name'];
+    $graph_groups = [];
+    if ($graph_layout === 'combined' && $items) {
+        $graph_groups[] = ['title' => _('Combined metrics'), 'itemids' => array_column($items, 'itemid')];
+    }
+    else {
+        foreach ($items as $item) {
+            $graph_groups[] = ['title' => $item['name'], 'itemids' => [$item['itemid']]];
         }
     }
-
-    if (!empty($unique_itemids)) {
-        // Helper: consolidated chart for a time range
-        $build_consolidated_chart = static function (
-            array $itemids,
-            string $from_str,
-            string $to_str,
-            string $title_text,
-            int $width = 800,
-            int $height = 300
-        ) {
-            $chart_div = new CDiv();
-            $chart_div->addClass('chart-item');
-
-            $title = (new CTag('h5', false, $title_text))->addClass('chart-title');
-            $chart_div->addItem($title);
-
-            $base_params = [
-                'from' => $from_str,   // e.g. '2025-09-11 16:38:57'
-                'to'   => $to_str,     // e.g. '2025-09-11 17:38:57' or 'now'
-                'type' => 0,
-                'resolve_macros' => 1,
-                'width' => $width,
-                'height' => $height,
-                'profileIdx' => 1,
-                '_' => time() // cache buster
-            ];
-
-            $chart_url = 'chart.php?' . http_build_query($base_params);
-            foreach ($itemids as $itemid) {
-                $chart_url .= '&itemids[]=' . urlencode($itemid);
-            }
-
-            $img = new CTag('img', true);
-            $img->setAttribute('src', $chart_url);
-            $img->setAttribute('alt', $title_text);
-            $img->setAttribute('title', $title_text);
-            $img->setAttribute('width', $width);
-            $img->setAttribute('height', $height);
-            $img->addClass('chart-image');
-
-            $chart_div->addItem($img);
-            return $chart_div;
-        };
-
-        // Show item list if multiple items (bullet list)
-        if (count($item_names) > 1) {
-            $items_list = new CDiv();
-            $items_list->addClass('chart-items-list');
-
-            $ul = new CTag('ul', false);
-            foreach ($item_names as $name) {
-                $ul->addItem(new CTag('li', false, $name));
-            }
-
-            $items_list->addItem(new CTag('strong', false, _('Items') . ':'));
-            $items_list->addItem($ul);
-
-            $charts_container->addItem($items_list);
-        }
-
-        // 1) 6h before incident → now
-        $title_6h = (count($item_names) === 1)
-            ? $item_names[0] . ' (' . _('6h around incident') . ')'
-            : _('Combined metrics') . ' (' . _('6h around incident') . ', ' . count($unique_itemids) . ' ' . _('items') . ')';
-
-        $charts_container->addItem(
-            $build_consolidated_chart($unique_itemids, $from_6h_param, $event_param, $title_6h, 800, 300)
-        );
-
-        // 2) From incident → now
-        $title_inc_now = (count($item_names) === 1)
-            ? $item_names[0] . ' (' . _('From incident to now') . ')'
-            : _('Combined metrics') . ' (' . _('From incident to now') . ', ' . count($unique_itemids) . ' ' . _('items') . ')';
-
-        $charts_container->addItem(
-            $build_consolidated_chart($unique_itemids, $event_param, $to_now_param, $title_inc_now, 800, 300)
-        );
+    foreach ($graph_groups as $index => $group) {
+        $history_params = ['itemids' => $group['itemids'], 'from' => $timeline['from'], 'to' => $timeline['to']];
+        $graph_url = 'history.php?'.http_build_query($history_params + [
+            'action' => count($group['itemids']) > 1 ? HISTORY_BATCH_GRAPH : HISTORY_GRAPH
+        ]);
+        $values_url = 'history.php?'.http_build_query($history_params + ['action' => HISTORY_VALUES]);
+        $chart_url = 'chart.php?'.http_build_query($history_params + [
+            // Without profileIdx, Zabbix replaces explicit from/to with its default period.
+            'profileIdx' => 1,
+            'type' => GRAPH_TYPE_NORMAL, 'resolve_macros' => 1, 'width' => 800, 'height' => 300, '_' => time()
+        ]);
+        $image = (new CTag('img', false))->setAttribute('src', $chart_url)->setAttribute('alt', $group['title'])
+            ->setAttribute('width', 800)->setAttribute('height', 300)->setAttribute('loading', 'lazy')
+            ->addClass('chart-image');
+        $graphs_div->addItem((new CSectionCollapsible($image))->setId($graph_id.'-chart-'.$index)
+            ->setHeader([
+                new CTag('h4', true, $group['title']),
+                (new CDiv([
+                    (new CLink(_('Open interactive graph'), $graph_url))->setTarget('_blank'),
+                    (new CLink(_('Values'), $values_url))->setTarget('_blank')
+                ]))->addClass('analist-graph-links')
+            ])->setExpanded(true));
     }
-
-    $graphs_div->addItem($charts_container);
-
-} elseif ($items && !isset($event['clock'])) {
-    $graphs_div->addItem(new CDiv(_('Event timestamp not available for chart generation')));
-} else {
-    $graphs_div->addItem(new CDiv(_('No graph data available')));
-}
-
-
+    if (!$graph_groups) {
+        $graphs_div->addItem((new CTableInfo())->setNoDataMessage(_('No numeric items are available for this event.')));
+    }
 }
 $panels['graphs'] = $graphs_div;
 
@@ -1129,7 +1080,11 @@ $output = [
         'cancel' => true,
         'action' => 'return true;'
     ]],
-    'script_inline' => 'window.AnalistProblemPopup.mount('.json_encode($popup_config,
+    // Native popup responses execute script_inline before mounting their controls.
+    // Pages opened before a module update may not have loaded the popup runtime.
+    'script_inline' => 'if (!window.AnalistProblemPopup) {'.
+        $this->readJsFile('analist-popup.js', null, '/../assets/js').
+        "\n}\nwindow.AnalistProblemPopup.mount(".json_encode($popup_config,
         JSON_HEX_TAG | JSON_HEX_AMP | JSON_HEX_APOS | JSON_HEX_QUOT).');'
 ];
 

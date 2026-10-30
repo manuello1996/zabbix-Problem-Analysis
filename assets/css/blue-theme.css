@@ -1126,3 +1126,36 @@ td:has(.js-lts-button-widget) {
 .event-details-popup [data-history-more][hidden] {
     display: none;
 }
+.event-details-popup .analist-graph-toolbar,
+.event-details-popup .analist-graph-custom-range:not([hidden]),
+.event-details-popup .analist-graph-links {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 10px;
+}
+.event-details-popup .analist-graph-custom-range:not([hidden]) {
+    margin-top: 12px;
+}
+.event-details-popup [data-graph-custom-range][hidden] {
+    display: none;
+}
+.event-details-popup [data-graph-message] {
+    margin: 10px 0;
+}
+.event-details-popup [data-graph-message]:empty {
+    display: none;
+}
+.event-details-popup .analist-graphs > section {
+    margin-top: 16px;
+}
+.event-details-popup .analist-graphs .section-head h4 {
+    margin: 0;
+}
+.event-details-popup .analist-graph-links {
+    margin-left: auto;
+}
+.event-details-popup .analist-graphs .chart-image {
+    display: block;
+    margin: 0 auto;
+}

@@ -33,6 +33,70 @@ export async function runRegression(fixture, asset, popupAsset, fragments = {}, 
         assert(fragments.graphs.response.body.includes('width="800"'));
         assert(fragments.graphs.response.body.includes('height="300"'), 'Graph images reserve space before loading');
         assert(!fragments.graphs.response.body.includes('file:///'), 'Charts use frontend URLs');
+        assert(fragments.graphs.response.body.includes('<z-select') && fragments.graphs.response.body.includes('toggleCalendar('),
+            'Graph controls use native Zabbix selects and calendars');
+        assert(fragments.graphs.response.body.includes('toggleSection('), 'Graphs use native collapsible sections');
+        assert(fragments.graphs.response.body.includes('Open interactive graph'));
+        assert(!fragments.graphs.response.body.includes('name="graph_layout"'),
+            'A single graphable item has no Display dropdown');
+        assert(fragments.graphs.response.body.includes('data-graph-custom-range="" hidden="hidden"'));
+        const ids = [...fragments.graphs.response.body.matchAll(/\bid="([^"]+)"/g)].map(match => match[1]);
+        assert.equal(ids.length, new Set(ids).size, 'Graph controls and calendars have unique IDs');
+    }
+    const graphImages = body => [...body.matchAll(/<img[^>]+src="([^"]+)"/g)]
+        .map(match => new URL(match[1].replaceAll('&amp;', '&'), 'http://zabbix.test/'));
+    for (const rendered of [fragments.graphs, ...Object.entries(actionFixtures)
+            .filter(([scenario]) => scenario.startsWith('graphs-')).map(([, value]) => value)].filter(Boolean)) {
+        assert.equal(rendered.chart_periods.length, graphImages(rendered.response.body).length);
+        for (const period of rendered.chart_periods) {
+            assert.equal(period.from_ts, rendered.graph_timeline.from_ts,
+                'The native chart resolver must honor the selected start instead of using the default period');
+            assert.equal(period.to_ts, rendered.graph_timeline.to_ts,
+                'The native chart resolver must honor the selected end instead of using now');
+        }
+    }
+    if (actionFixtures['graphs-before']) {
+        const rendered = actionFixtures['graphs-before'];
+        assert.equal(rendered.chart_periods.length, 1);
+        assert.equal(rendered.chart_periods[0].to_ts - rendered.chart_periods[0].from_ts, 6 * 3600,
+            '6 hours before problem must render a six-hour chart');
+        assert.equal(rendered.chart_periods[0].to_ts, rendered.event.clock,
+            'The six-hour chart ends at problem start');
+    }
+    if (actionFixtures['graphs-many']) {
+        const body = actionFixtures['graphs-many'].response.body;
+        assert(body.includes('name="graph_layout"'), 'Two graphable items enable the Display dropdown');
+        const images = graphImages(body);
+        assert.equal(images.length, 2, 'Individual mode gives each item its own scale');
+        images.forEach((url, index) => {
+            assert.equal(url.pathname, '/chart.php');
+            assert.equal(url.searchParams.get('itemids[0]'), String(index + 1));
+            assert.equal(url.searchParams.get('itemids[1]'), null);
+        });
+        assert(!body.includes('<metric>') && body.includes('&lt;metric&gt;'), 'Graph item names are escaped');
+        const links = [...body.matchAll(/href="(history\.php[^\"]+)"/g)]
+            .map(match => new URL(match[1].replaceAll('&amp;', '&'), 'http://zabbix.test/'));
+        assert.equal(links.length, 4);
+        assert(links.some(url => url.searchParams.get('action') === 'showvalues'));
+        links.forEach(url => {
+            assert.equal(url.searchParams.get('from'), images[0].searchParams.get('from'));
+            assert.equal(url.searchParams.get('to'), images[0].searchParams.get('to'));
+        });
+    }
+    if (actionFixtures['graphs-combined']) {
+        const body = actionFixtures['graphs-combined'].response.body;
+        const images = graphImages(body);
+        assert.equal(images.length, 1);
+        assert.equal(images[0].searchParams.get('itemids[1]'), '2');
+        assert(body.includes('action=batchgraph'), 'Combined graphs open the native batch graph view');
+    }
+    if (actionFixtures['graphs-empty']) {
+        assert(!actionFixtures['graphs-empty'].response.body.includes('name="graph_layout"'));
+        assert.equal(graphImages(actionFixtures['graphs-empty'].response.body).length, 0);
+        assert(actionFixtures['graphs-empty'].response.body.includes('No numeric items'));
+    }
+    if (actionFixtures['graphs-custom']) {
+        assert(!actionFixtures['graphs-custom'].response.body.includes('data-graph-custom-range="" hidden="hidden"'));
     }
     if (actionFixtures['history-preview']) {
         const body = actionFixtures['history-preview'].response.body;
@@ -291,7 +355,16 @@ export async function runRegression(fixture, asset, popupAsset, fragments = {}, 
             });
         }
     });
+    delete context.window.AnalistProblemPopup;
+    const coldRoot = popupRoot(); roots.set(config.rootId, coldRoot);
+    vm.runInContext(inline, context);
     const Popup = context.window.AnalistProblemPopup;
+    assert.equal(typeof Popup?.mount, 'function',
+        'A native popup response provides its runtime without a preloaded popup asset');
+    const initialPopup = [...Popup.instances].find(instance => instance.root === coldRoot);
+    assert(initialPopup && initialPopup.activeTab === 'overview' && coldRoot.handlers.get('click').size === 1,
+        'The response defines the runtime before mounting the popup controls');
+    initialPopup.destroy(); roots.delete(config.rootId);
     const rootA = popupRoot(); roots.set('a', rootA);
     let layouts = 0;
     overlays.set(rootA.dialogue.dataset.dialogueid, {$dialogue: [rootA.dialogue], centerDialog() { layouts++; }});
@@ -301,6 +374,15 @@ export async function runRegression(fixture, asset, popupAsset, fragments = {}, 
     const first = popupA.activateTab('timeline');
     assert.equal(popupA.loadTab('timeline'), first, 'Concurrent visits reuse the pending request');
     assert.equal(pending.length, 1);
+    const reopenRoot = popupRoot(); roots.set(config.rootId, reopenRoot);
+    vm.runInContext(inline, context);
+    assert.equal(context.window.AnalistProblemPopup, Popup,
+        'Opening a second popup must preserve the existing runtime and its instance registry');
+    assert(Popup.instances.has(popupA) && !popupA.closed && !pending[0].options.signal.aborted,
+        'Opening a second popup preserves requests and handlers owned by the first popup');
+    const reopened = [...Popup.instances].find(instance => instance.root === reopenRoot);
+    assert(reopened && !reopened.closed, 'The native response mounts its own popup when the runtime already exists');
+    reopened.destroy(); roots.delete(config.rootId);
     assert.equal(pending[0].options.body.get('tab'), 'timeline');
     pending[0].resolve({body: '<p>Timeline</p>'}); await first;
     await popupA.activateTab('overview'); await popupA.activateTab('timeline');
@@ -671,6 +753,82 @@ export async function runRegression(fixture, asset, popupAsset, fragments = {}, 
     assert(pending[index].options.signal.aborted && historyPopup.historyRequests.size === 0,
         'Closing cancels item history requests');
 
+    const graphRoot = popupRoot(); roots.set('graph-controls', graphRoot);
+    const graphPopup = Popup.mount({...config, rootId: 'graph-controls'});
+    index = pending.length;
+    loading = graphPopup.activateTab('graphs');
+    const graphBody = fragments.graphs?.response.body || 'Native graph controls';
+    pending[index].resolve({body: graphBody}); await loading;
+    const graphForm = new Panel(''); graphForm.popupRoot = graphRoot;
+    graphForm.matches = selector => selector === '[data-graph-controls]';
+    const periodInput = {value: 'before', matches: () => true, closest: () => graphForm};
+    const customRange = {hidden: true};
+    const fromInput = {value: 'now-6h'};
+    const toInput = {value: 'now'};
+    const graphSubmit = {disabled: false};
+    const graphMessage = {textContent: ''};
+    const graphFields = {
+        '[name="graph_period"]': periodInput,
+        '[data-graph-custom-range]': customRange, '[data-graph-from] input': fromInput,
+        '[data-graph-to] input': toInput, '[type="submit"]': graphSubmit, '[data-graph-message]': graphMessage
+    };
+    graphForm.querySelector = selector => graphFields[selector];
+    periodInput.value = 'custom';
+    graphRoot.dispatch('change', {target: periodInput});
+    assert(!customRange.hidden, 'Custom period reveals the native date fields');
+    periodInput.value = 'before';
+    graphRoot.dispatch('change', {target: periodInput});
+    assert(customRange.hidden, 'Preset periods hide custom date fields');
+    periodInput.value = 'custom';
+    index = pending.length;
+    let prevented = false, stopped = false;
+    graphRoot.dispatch('submit', {target: graphForm, preventDefault() { prevented = true; }, stopPropagation() { stopped = true; }});
+    let graphLoading = graphPopup.graphRequest;
+    assert(prevented && stopped, 'Graph forms update this tab without submitting the popup');
+    assert.equal(graphPopup.updateGraphs(graphForm), graphLoading, 'Repeated Apply clicks share the pending request');
+    assert(graphSubmit.disabled && !graphRoot.cancelButton.disabled);
+    assert.equal(pending[index].options.body.get('graph_from'), 'now-6h');
+    assert.equal(pending[index].options.body.get('graph_to'), 'now');
+    pending[index].resolve({error: {messages: ['Invalid graph period']}}); await graphLoading;
+    assert.equal(graphMessage.textContent, 'Invalid graph period');
+    assert.equal(graphPopup.panels.get('graphs').innerHTML, graphBody, 'Invalid periods retain the existing graphs and form');
+    assert(!graphSubmit.disabled && fromInput.value === 'now-6h');
+    index = pending.length;
+    graphLoading = graphPopup.updateGraphs(graphForm);
+    await graphPopup.activateTab('overview');
+    pending[index].resolve({body: 'Updated custom graphs'}); await graphLoading;
+    assert.equal(graphPopup.activeTab, 'overview', 'Late graph updates must preserve the selected tab');
+    assert.equal(graphPopup.graphOptions.graph_period, 'custom');
+    await graphPopup.activateTab('graphs');
+    index = pending.length;
+    reloading = graphPopup.refreshTab();
+    assert.equal(pending[index].options.body.get('graph_from'), 'now-6h', 'Refresh preserves the active graph period');
+    pending[index].resolve({body: 'Refreshed custom graphs'}); await reloading;
+    index = pending.length;
+    loading = graphPopup.activateTab('overview');
+    pending[index].resolve({body: 'Overview'}); await loading;
+    index = pending.length;
+    reloading = graphPopup.refreshTab();
+    pending[index].resolve({body: 'Overview refreshed'}); await reloading;
+    assert.equal(Object.keys(graphPopup.graphOptions).length, 0, 'Refreshing another tab discards graph options');
+    index = pending.length;
+    loading = graphPopup.activateTab('graphs');
+    assert.equal(pending[index].options.body.get('graph_period'), null);
+    pending[index].resolve({body: graphBody}); await loading;
+    periodInput.value = 'before';
+    index = pending.length;
+    graphLoading = graphPopup.updateGraphs(graphForm);
+    reloading = graphPopup.refreshTab();
+    await graphLoading;
+    assert(pending[index].options.signal.aborted, 'Refresh cancels an in-flight graph update');
+    pending[index + 1].resolve({body: graphBody}); await reloading;
+    index = pending.length;
+    graphLoading = graphPopup.updateGraphs(graphForm);
+    graphRoot.dialogue.dispatch('dialogue.close'); await graphLoading;
+    assert(pending[index].options.signal.aborted && graphPopup.graphRequest === null);
+    assert.equal(graphRoot.handlers.get('submit').size, 0);
+    assert.equal(graphRoot.handlers.get('change').size, 0);
+
     function tableFixture() {
         const header = new Element('tr');
         header.appendChild(new Element('th')); header.appendChild(new Element('th'));
@@ -737,6 +895,9 @@ if (typeof process !== 'undefined' && process.argv[1] && path.resolve(process.ar
     }
     actionFixtures['history-preview'] = render('overview', 'history-preview');
     actionFixtures['history-fragment'] = render('history');
+    for (const scenario of ['graphs-many', 'graphs-combined', 'graphs-empty', 'graphs-custom', 'graphs-before']) {
+        actionFixtures[scenario] = render('graphs', scenario);
+    }
     await runRegression(render('overview'), fs.readFileSync(path.join(root, 'assets/js/analist-problem.js'), 'utf8'),
         fs.readFileSync(path.join(root, 'assets/js/analist-popup.js'), 'utf8'), fragments, actionFixtures);
 }

@@ -55,4 +55,59 @@ foreach (['itemid', 'before_clock', 'before_ns'] as $required) {
 foreach (['itemid' => 'not-an-id', 'before_clock' => '-1', 'before_ns' => '1000000000'] as $field => $value) {
     $validate(array_replace($history, [$field => $value]), false);
 }
+$graph_request = ['eventid' => '1', 'tab' => 'graphs', 'graph_period' => 'custom', 'graph_layout' => 'items',
+    'graph_from' => 'now-6h', 'graph_to' => 'now'];
+$input = $validate($graph_request, true);
+foreach ($graph_request as $name => $value) {
+    if (!isset($input[$name]) || $input[$name] !== $value) throw new RuntimeException('Lost graph parameter: '.$name);
+}
+foreach (['graph_from', 'graph_to'] as $required) {
+    $request = $graph_request;
+    unset($request[$required]);
+    $validate($request, false);
+}
+$validate(array_replace($graph_request, ['graph_from' => 'not a date']), false);
+$validate(array_replace($graph_request, ['graph_period' => 'invalid']), false);
+$validate(array_replace($graph_request, ['graph_layout' => 'invalid']), false);
+$validate(['eventid' => '1', 'tab' => 'graphs'], true);
+
+$settings = new ReflectionProperty(CSettingsHelper::class, 'params');
+$settings->setAccessible(true);
+$settings->setValue(null, [CSettingsHelper::MAX_PERIOD => '2y']);
+$timeline_method = $controller_class->getMethod('getGraphTimeline');
+$timeline_method->setAccessible(true);
+$timeline = static function (array $options, array $event) use ($controller_class, $validated_input, $timeline_method): array {
+    $controller = $controller_class->newInstanceWithoutConstructor();
+    $validated_input->setValue($controller, $options);
+    return $timeline_method->invoke($controller, $event);
+};
+date_default_timezone_set('Europe/Zurich');
+$graph_event = ['clock' => time() - 7200];
+$range = $timeline([], $graph_event);
+if ($range['from_ts'] !== $graph_event['clock'] - 3600 || $range['to_ts'] !== $graph_event['clock'] + 3600) {
+    throw new RuntimeException('The default graph period must span one hour on each side of the problem start');
+}
+$range = $timeline(['graph_period' => 'before'], $graph_event);
+if ($range['to_ts'] !== $graph_event['clock'] || $range['to_ts'] - $range['from_ts'] !== 21600) {
+    throw new RuntimeException('Before problem must end at the event timestamp');
+}
+$range = $timeline(['graph_period' => 'duration'], $graph_event + ['recovery_clock' => $graph_event['clock'] + 120]);
+if ($range['to_ts'] !== $graph_event['clock'] + 120) throw new RuntimeException('Resolved graphs must end at recovery');
+$range = $timeline(['graph_period' => 'duration'], $graph_event + ['recovery_clock' => $graph_event['clock'] + 10]);
+if ($range['to_ts'] - $range['from_ts'] + 1 < ZBX_MIN_PERIOD) throw new RuntimeException('Short problems need a valid native graph period');
+$range = $timeline(['graph_period' => 'day'], $graph_event);
+if ($range['from'] !== 'now-1d' || $range['to'] !== 'now') throw new RuntimeException('Live periods must remain relative');
+$range = $timeline(['graph_period' => 'custom', 'graph_from' => '2026-03-29 01:30:00',
+    'graph_to' => '2026-03-29 03:30:00'], $graph_event);
+if ($range['to_ts'] - $range['from_ts'] !== 3600) throw new RuntimeException('Custom ranges must use the native frontend timezone across DST');
+foreach ([['now', 'now-1h'], ['now-10s', 'now'], ['now-3y', 'now']] as [$from, $to]) {
+    try {
+        $timeline(['graph_period' => 'custom', 'graph_from' => $from, 'graph_to' => $to], $graph_event);
+    }
+    catch (RuntimeException $exception) {
+        continue;
+    }
+    throw new RuntimeException('Invalid graph periods must respect native minimum and maximum limits');
+}
+
 echo "Native input validation checks passed.\n";
