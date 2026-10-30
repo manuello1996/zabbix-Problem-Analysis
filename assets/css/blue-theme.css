@@ -1121,6 +1121,86 @@ td:has(.js-lts-button-widget) {
 
 
 
+/* Preserve the original Time Patterns appearance with accessible controls. */
+.analist-patterns [hidden] { display: none !important; }
+.analist-pattern-toolbar,
+.analist-pattern-custom-range:not([hidden]) {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 10px;
+}
+.analist-pattern-custom-range { margin-top: 12px; }
+.analist-patterns [data-pattern-message]:empty { display: none; }
+.analist-patterns [data-pattern-filter]:not([hidden]) { display: flex; }
+.analist-patterns [data-pattern-days]:not([hidden]) { display: block; }
+.analist-patterns button.mnz-heatmap-cell,
+.analist-patterns button[data-pattern-index] {
+    appearance: none;
+    box-sizing: content-box;
+    padding: 0;
+    border: 0;
+    height: auto;
+    line-height: normal;
+    background: transparent;
+    box-shadow: none;
+    color: inherit;
+    font-family: inherit;
+    font-weight: normal;
+    text-align: center;
+    white-space: normal;
+}
+.analist-patterns button.mnz-heatmap-cell {
+    width: 32px;
+    height: 32px;
+    min-height: 32px;
+    line-height: 32px;
+    color: #fff;
+}
+.analist-patterns .mnz-heatmap-cell[data-level='0'] { background: #e9ecef; }
+.analist-patterns .mnz-heatmap-cell[data-level='1'] { background: #27ae60; }
+.analist-patterns .mnz-heatmap-cell[data-level='2'] { background: #e67e22; }
+.analist-patterns .mnz-heatmap-cell[data-level='3'] { background: #c0392b; }
+.analist-patterns .mnz-heatmap-cell[aria-pressed='true'],
+.analist-patterns .mnz-heatmap-cell:focus-visible {
+    outline: 2px solid #0275b8;
+    outline-offset: 1px;
+}
+.analist-patterns button[data-pattern-index]:focus-visible {
+    outline: 2px solid #0275b8;
+    outline-offset: 2px;
+}
+.analist-patterns button[data-pattern-index][aria-pressed='true'] > span:last-child {
+    text-decoration: underline;
+}
+.analist-patterns [data-pattern-bar] { background: #0275b8; min-height: 4px; }
+.analist-patterns [data-pattern-bars='weekday'] [data-pattern-bar] { background: #28a745; }
+.analist-patterns [data-pattern-month]:last-child [data-pattern-bar]:not(.is-empty) { background: #ff9800; }
+.analist-patterns [data-pattern-bar].is-empty { background: #e9ecef; }
+.analist-patterns [data-pattern-bars='month'] [data-pattern-count] {
+    font-size: 11px;
+    font-weight: bold;
+}
+.analist-patterns [data-pattern-bars='day'] { gap: 4px; }
+.analist-patterns [data-pattern-bars='day'] [data-pattern-count] { font-size: 11px; }
+.analist-patterns [data-pattern-bars='hour'],
+.analist-patterns [data-pattern-bars='weekday'] {
+    height: 140px;
+    gap: 2px;
+    padding: 10px;
+}
+.analist-patterns [data-pattern-bars='hour'] [data-pattern-count],
+.analist-patterns [data-pattern-bars='weekday'] [data-pattern-count] { font-size: 10px; font-weight: normal; }
+.analist-patterns [data-pattern-bars='hour'] .mnz-investigation-bar-label,
+.analist-patterns [data-pattern-bars='weekday'] .mnz-investigation-bar-label { font-size: 8px; }
+.analist-patterns [data-pattern-bars='hour'] [data-pattern-bar],
+.analist-patterns [data-pattern-bars='weekday'] [data-pattern-bar] { max-width: none; min-height: 2px; }
+.analist-patterns .mnz-investigation-bar-item { justify-content: flex-end; }
+[theme='dark-theme'] .analist-patterns .mnz-heatmap-cell[data-level='0'],
+[theme='dark-theme'] .analist-patterns [data-pattern-bar].is-empty { background: #3a3a3a; }
+[theme='dark-theme'] .analist-patterns .mnz-heatmap-cell[aria-pressed='true'],
+[theme='dark-theme'] .analist-patterns .mnz-heatmap-cell:focus-visible { outline-color: #5dade2; }
+
 /* Related hierarchy services are preloaded and collapsed independently. */
 .event-details-popup .analist-related-services {
     margin-top: 24px;

@@ -1,505 +1,170 @@
 /* Each popup owns its requests, cached tabs and handlers. */
 (() => {
-    function initializePatterns(root, timePatternData) {
-        const jQuery = selector => window.jQuery(selector, root);
-        const hourlyData = timePatternData.hourlyData;
-        const weeklyData = timePatternData.weeklyData;
-        const weekdayLabels = timePatternData.weekLabels;
-        const hourLabels = timePatternData.hourLabels;
-        var createPatternCharts = function() {
-
-            if (typeof d3 === "undefined") {
-                createCSSFallbackCharts();
+    function initializePatterns(root, d, onLayout = () => {}) {
+        const panel = root.querySelector('[data-pattern-view]');
+        if (!panel) return null;
+        const lifecycle = new AbortController();
+        var clocks = (d.eventClocks || []).map(Number);
+        var monthKeys = d.monthKeys;
+        const filters = {month: null, day: null, weekday: null, hour: null};
+        let daysOpen = false;
+        const select = selector => panel.querySelector(selector);
+        const all = selector => Array.from(panel.querySelectorAll(selector));
+        var computeAggregates = function(clockList) {
+            const hourly = Array(24).fill(0), weekly = Array(7).fill(0);
+            const weeklyHourlyDetails = Array.from({length: 7}, () => Array(24).fill(0));
+            const monthly = monthKeys.map(() => 0);
+            const monthlyDailyDetails = monthKeys.map((key, index) => Array(d.monthDays[index]).fill(0));
+            for (const clock of clockList) {
+                const slot = d.eventSlots[clock];
+                hourly[slot.hour]++;
+                weekly[slot.weekday]++;
+                weeklyHourlyDetails[slot.weekday][slot.hour]++;
+                const month = monthKeys.indexOf(slot.month);
+                if (month >= 0) {
+                    monthly[month]++;
+                    monthlyDailyDetails[month][slot.day - 1]++;
+                }
+            }
+            return {hourly, weekly, weeklyHourlyDetails, monthly, monthlyDailyDetails};
+        };
+        const rangeAgg = computeAggregates(clocks);
+        const scaleMax = Math.max(0, ...rangeAgg.weeklyHourlyDetails.flat());
+        const matchingClocks = (includeSlot = true) => clocks.filter(clock => {
+            const slot = d.eventSlots[clock];
+            return (filters.month === null || slot.month === monthKeys[filters.month])
+                && (filters.day === null || slot.day === filters.day)
+                && (!includeSlot || filters.weekday === null
+                    || (slot.weekday === filters.weekday && slot.hour === filters.hour));
+        });
+        var renderHeatmap = function(agg) {
+            for (const cell of all('[data-pattern-slot]')) {
+                const weekday = Number(cell.dataset.weekday), hour = Number(cell.dataset.hour);
+                const count = agg.weeklyHourlyDetails[weekday][hour];
+                const selected = filters.weekday === weekday && filters.hour === hour;
+                cell.textContent = String(count);
+                const intensity = count / scaleMax;
+                cell.dataset.level = count === 0 ? '0' : intensity > 0.8 ? '3' : intensity > 0.5 ? '2' : '1';
+                cell.setAttribute('aria-pressed', String(selected));
+                cell.classList.toggle('is-muted', filters.weekday !== null && !selected);
+                const label = d.weekLabels[weekday] + ' ' + d.hourLabels[hour] + '–'
+                    + String(hour + 1).padStart(2, '0') + ':00: ' + count + ' ' + d.incidents;
+                cell.title = label;
+                cell.setAttribute('aria-label', label);
+            }
+        };
+        var countSameSlotLastWeek = function(weekday, hour) {
+            return clocks.filter(clock => clock >= d.lastWeekStart && clock < d.lastWeekEnd
+                && d.eventSlots[clock].weekday === weekday && d.eventSlots[clock].hour === hour).length;
+        };
+        var updateFilterBar = function(count) {
+            const labels = [];
+            if (filters.month !== null) labels.push(d.monthLabels[filters.month]);
+            if (filters.day !== null) labels.push(String(filters.day));
+            if (filters.weekday !== null) labels.push(d.weekLabels[filters.weekday] + ' ' + d.hourLabels[filters.hour]);
+            select('[data-pattern-filter]').hidden = labels.length === 0;
+            let label = d.filteredBy + ': ' + labels.join(' / ');
+            if (filters.weekday !== null && d.lastWeekStart >= d.fromTs && d.lastWeekEnd <= d.toTs) {
+                label += ' · ' + d.sameSlotLastWeek + ': ' + countSameSlotLastWeek(filters.weekday, filters.hour);
+            }
+            select('[data-pattern-filter-label]').textContent = label;
+            select('[data-pattern-status]').textContent = !clocks.length ? d.noEvents : count === 0 ? d.noMatches
+                : (labels.length ? d.selectedOccurrences : d.allOccurrences) + ': ' + count;
+            select('[data-pattern-status]').hidden = count > 0;
+        };
+        const renderBars = (kind, values, labels, active = null) => {
+            const chart = select('[data-pattern-bars="' + kind + '"]');
+            const max = Math.max(1, ...values);
+            for (const item of chart.querySelectorAll('[data-pattern-index]')) {
+                const index = Number(item.dataset.patternIndex);
+                item.hidden = index >= values.length;
+                if (item.hidden) continue;
+                const count = values[index];
+                item.querySelector('[data-pattern-count]').textContent = count > 0 || kind === 'month' || kind === 'day'
+                    ? String(count) : '';
+                const bar = item.querySelector('[data-pattern-bar]');
+                const height = kind === 'hour' || kind === 'weekday' ? 110 : kind === 'day' ? 80 : 100;
+                bar.style.height = (count / max * height) + 'px';
+                bar.classList.toggle('is-empty', count === 0);
+                item.title = labels[index] + ': ' + count + ' ' + d.incidents;
+                if (item.hasAttribute('aria-pressed')) {
+                    item.setAttribute('aria-pressed', String(index === active));
+                    item.setAttribute('aria-label', item.title);
+                }
+            }
+        };
+        const render = () => {
+            const selected = matchingClocks();
+            const agg = computeAggregates(selected);
+            // Keep the selected date's heatmap visible as context while a slot filters the distributions.
+            renderHeatmap(computeAggregates(matchingClocks(false)));
+            renderBars('month', agg.monthly, d.monthLabels, filters.month);
+            renderBars('hour', agg.hourly, d.hourLabels);
+            renderBars('weekday', agg.weekly, d.weekLabels);
+            select('[data-pattern-days]').hidden = filters.month === null || !daysOpen;
+            if (filters.month !== null) {
+                select('[data-pattern-day-title]').textContent = d.monthLabels[filters.month];
+                renderBars('day', agg.monthlyDailyDetails[filters.month],
+                    Array.from({length: d.monthDays[filters.month]}, (_, i) => i + 1),
+                    filters.day === null ? null : filters.day - 1);
+            }
+            updateFilterBar(selected.length);
+            onLayout();
+        };
+        panel.addEventListener('click', event => {
+            const button = event.target.closest('[data-pattern-slot], [data-pattern-month], [data-pattern-day], [data-pattern-clear], [data-pattern-toggle], [data-pattern-hide-days]');
+            if (!button || !panel.contains(button)) return;
+            event.preventDefault();
+            if (button.hasAttribute('data-pattern-toggle')) {
+                const body = select('[data-pattern-body="' + button.dataset.patternToggle + '"]');
+                body.hidden = !body.hidden;
+                button.setAttribute('aria-expanded', String(!body.hidden));
+                button.textContent = body.hidden ? d.expandLabel : d.collapseLabel;
+                onLayout();
                 return;
-            }
-
-            // Hourly pattern chart
-            if (jQuery("#hourly-pattern-chart").length) {
-                createBarChart("#hourly-pattern-chart", hourlyData, hourLabels, "#0275b8");
-            }
-
-            // Weekly pattern chart
-            if (jQuery("#weekly-pattern-chart").length) {
-
-                createBarChart("#weekly-pattern-chart", weeklyData, weekdayLabels, "#28a745");
+            } else if (button.hasAttribute('data-pattern-hide-days')) {
+                daysOpen = false;
+            } else if (button.hasAttribute('data-pattern-clear')) {
+                Object.assign(filters, {month: null, day: null, weekday: null, hour: null});
+                daysOpen = false;
+            } else if (button.hasAttribute('data-pattern-month')) {
+                const month = Number(button.dataset.patternMonth);
+                filters.month = filters.month === month ? null : month;
+                filters.day = null;
+                daysOpen = filters.month !== null;
+            } else if (button.hasAttribute('data-pattern-day')) {
+                const day = Number(button.dataset.patternDay) + 1;
+                filters.day = filters.day === day ? null : day;
             } else {
-
+                const weekday = Number(button.dataset.weekday), hour = Number(button.dataset.hour);
+                const selected = filters.weekday === weekday && filters.hour === hour;
+                filters.weekday = selected ? null : weekday;
+                filters.hour = selected ? null : hour;
+                all('[data-pattern-slot]').forEach(cell => { cell.tabIndex = cell === button ? 0 : -1; });
             }
-        };
-
-        // CSS Fallback for when D3.js is not available
-        var createCSSFallbackCharts = function() {
-
-            // Hourly chart fallback
-            createCSSBarChart("#hourly-pattern-chart", hourlyData, hourLabels, "#0275b8");
-
-            // Weekly chart fallback
-            createCSSBarChart("#weekly-pattern-chart", weeklyData, weekdayLabels, "#28a745");
-        };
-
-        var createCSSBarChart = function(container, data, labels, color) {
-            var $container = jQuery(container);
-            if (!$container.length) return;
-
-            $container.empty();
-
-            // Define missing color variables
-            var emptyBarColor = "#e0e0e0";
-            var textColor = "#333333";
-            var labelColor = "#666666";
-
-            // Dark theme support
-            if (document.body.getAttribute("theme") === "dark-theme") {
-                emptyBarColor = "#3a3a3a";
-                textColor = "#cccccc";
-                labelColor = "#999999";
+            render();
+        }, {signal: lifecycle.signal});
+        panel.addEventListener('keydown', event => {
+            const cell = event.target.closest('[data-pattern-slot]');
+            if (!cell) return;
+            const cells = all('[data-pattern-slot]');
+            const index = cells.indexOf(cell), column = index % 24;
+            let next;
+            switch (event.key) {
+                case 'ArrowRight': next = index - column + (column + 1) % 24; break;
+                case 'ArrowLeft': next = index - column + (column + 23) % 24; break;
+                case 'ArrowDown': next = (index + 24) % cells.length; break;
+                case 'ArrowUp': next = (index + cells.length - 24) % cells.length; break;
+                case 'Home': next = index - column; break;
+                case 'End': next = index - column + 23; break;
+                default: return;
             }
-
-            var maxValue = Math.max.apply(Math, data);
-            if (maxValue === 0) maxValue = 1;
-
-            var chartHtml = "<div style=\"display: flex; align-items: end; height: 140px; gap: 2px; padding: 10px;\">";
-
-            for (var i = 0; i < data.length; i++) {
-                var height = (data[i] / maxValue) * 110;
-                var barColor = data[i] > 0 ? color : emptyBarColor;
-
-                chartHtml += "<div style=\"display: flex; flex-direction: column; align-items: center; flex: 1;\">";
-                chartHtml += "<div style=\"font-size: 10px; margin-bottom: 2px; color: " + textColor + ";\">" + (data[i] > 0 ? data[i] : "") + "</div>";
-                chartHtml += "<div style=\"background: " + barColor + "; width: 100%; height: " + height + "px; min-height: 2px;\"></div>";
-                chartHtml += "<div style=\"font-size: 8px; margin-top: 5px; color: " + labelColor + "; white-space: nowrap; text-align: center;\">" + labels[i] + "</div>";
-                chartHtml += "</div>";
-            }
-
-            chartHtml += "</div>";
-            $container.html(chartHtml);
-        };
-
-        var createBarChart = function(container, data, labels, color) {
-
-
-            var $container = jQuery(container);
-            if (!$container.length) {
-
-                return;
-            }
-
-            var containerEl = $container[0];
-            if (!containerEl.offsetWidth) {
-
-                createCSSBarChart(container, data, labels, color);
-                return;
-            }
-
-            var margin = {top: 15, right: 25, bottom: 35, left: 35};
-            var width = containerEl.offsetWidth - margin.left - margin.right;
-            var height = 140 - margin.top - margin.bottom;
-
-            if (width <= 0 || height <= 0) {
-
-                createCSSBarChart(container, data, labels, color);
-                return;
-            }
-
-            try {
-                // Clear previous chart
-                d3.select(root.querySelector(container)).selectAll("*").remove();
-
-                var svg = d3.select(root.querySelector(container))
-                    .append("svg")
-                    .attr("width", width + margin.left + margin.right)
-                    .attr("height", height + margin.top + margin.bottom)
-                    .append("g")
-                    .attr("transform", "translate(" + margin.left + "," + margin.top + ")");
-
-                var x = d3.scaleBand()
-                    .range([0, width])
-                    .domain(labels)
-                    .padding(0.1);
-
-                var y = d3.scaleLinear()
-                    .domain([0, d3.max(data) || 1])
-                    .range([height, 0]);
-
-                // Add bars
-                svg.selectAll(".bar")
-                    .data(data)
-                    .enter().append("rect")
-                    .attr("class", "bar")
-                    .attr("x", function(d, i) { return x(labels[i]); })
-                    .attr("width", x.bandwidth())
-                    .attr("y", function(d) { return y(d); })
-                    .attr("height", function(d) { return height - y(d); })
-                    .attr("fill", color)
-                    .attr("opacity", 0.8)
-                    .on("mouseover", function(event, d) {
-                        d3.select(this).attr("opacity", 1);
-                    })
-                    .on("mouseout", function(event, d) {
-                        d3.select(this).attr("opacity", 0.8);
-                    });
-
-                // Add labels on bars
-                svg.selectAll(".text")
-                    .data(data)
-                    .enter().append("text")
-                    .attr("x", function(d, i) { return x(labels[i]) + x.bandwidth()/2; })
-                    .attr("y", function(d) { return y(d) - 5; })
-                    .attr("text-anchor", "middle")
-                    .style("font-size", "10px")
-                    .style("fill", "#333")
-                    .text(function(d) { return d > 0 ? d : ""; });
-
-                                // Add X axis
-            svg.append("g")
-                .attr("transform", "translate(0," + height + ")")
-                .call(d3.axisBottom(x))
-                .selectAll("text")
-                .style("font-size", "9px")
-                .style("text-anchor", "middle");
-
-                // Add Y axis
-                svg.append("g")
-                    .call(d3.axisLeft(y).ticks(5))
-                    .selectAll("text")
-                    .style("font-size", "10px");
-
-
-
-            } catch (error) {
-                console.error("Error creating D3 chart:", error);
-
-                createCSSBarChart(container, data, labels, color);
-            }
-        };
-
-        var initAdvancedTimePatterns = function() {
-            var d = timePatternData;
-            if (!d || !jQuery("#mnz-investigation-heatmap").length || !jQuery("#mnz-investigation-monthly-chart").length) {
-                return;
-            }
-
-            var clocks = (d.eventClocks || []).map(function(t) { return parseInt(t, 10); }).filter(function(t) { return !isNaN(t); });
-            var monthKeys = d.monthKeys || [];
-            var isDark = document.body.getAttribute("theme") === "dark-theme" || document.documentElement.getAttribute("theme") === "dark-theme";
-            var barBg = isDark ? "#3a3a3a" : "#e9ecef";
-            var barFill = "#0275b8";
-            var textColor = isDark ? "#e0e0e0" : "#333333";
-            var labelColor = isDark ? "#999999" : "#666666";
-
-            var currentFilter = null;
-            var currentAgg = null;
-
-            var computeAggregates = function(clockList) {
-                var hourly = [];
-                var weekly = [];
-                var weeklyHourly = [];
-                var monthly = {};
-                var monthlyDaily = {};
-
-                for (var h = 0; h < 24; h++) hourly[h] = 0;
-                for (var w = 0; w < 7; w++) {
-                    weekly[w] = 0;
-                    weeklyHourly[w] = [];
-                    for (h = 0; h < 24; h++) weeklyHourly[w][h] = 0;
-                }
-
-                for (var m = 0; m < monthKeys.length; m++) {
-                    monthly[monthKeys[m]] = 0;
-                    monthlyDaily[monthKeys[m]] = [];
-                    for (var day = 0; day < 31; day++) monthlyDaily[monthKeys[m]][day] = 0;
-                }
-
-                for (var i = 0; i < clockList.length; i++) {
-                    var t = clockList[i];
-                    var dt = d.eventSlots[t];
-                    var hour = dt.hour;
-                    var weekday = dt.weekday;
-                    var ym = dt.month;
-                    var dIdx = dt.day - 1;
-
-                    hourly[hour]++;
-                    weekly[weekday]++;
-                    if (weeklyHourly[weekday]) weeklyHourly[weekday][hour]++;
-                    if (monthly[ym] !== undefined) {
-                        monthly[ym]++;
-                        if (monthlyDaily[ym] && dIdx >= 0 && dIdx < 31) monthlyDaily[ym][dIdx]++;
-                    }
-                }
-
-                var monthVals = [];
-                var monthDrill = [];
-                for (m = 0; m < monthKeys.length; m++) {
-                    var mk = monthKeys[m];
-                    monthVals.push(monthly[mk] || 0);
-                    monthDrill.push(monthlyDaily[mk] ? monthlyDaily[mk].slice(0, 31) : []);
-                }
-
-                return {
-                    hourly: hourly,
-                    weekly: weekly,
-                    monthly: monthVals,
-                    weeklyHourlyDetails: weeklyHourly,
-                    monthlyDailyDetails: monthDrill
-                };
-            };
-
-            var renderHeatmap = function(agg) {
-                var el = root.querySelector("#" + "mnz-investigation-heatmap");
-                if (!el) return;
-
-                var wh = agg.weeklyHourlyDetails || [];
-                var weekDisplayOrder = [1, 2, 3, 4, 5, 6, 0]; // Monday first, Sunday last
-                var maxVal = 0;
-                for (var w = 0; w < 7; w++) {
-                    for (var h = 0; h < 24; h++) {
-                        if (wh[w] && wh[w][h] > maxVal) maxVal = wh[w][h];
-                    }
-                }
-                if (maxVal === 0) maxVal = 1;
-
-                var html = "<div class=\"mnz-heatmap-grid\"><div class=\"mnz-heatmap-labels-col\"><div class=\"mnz-heatmap-corner\"></div>";
-                for (var wi = 0; wi < 7; wi++) {
-                    var weekdayIdx = weekDisplayOrder[wi];
-                    html += "<div class=\"mnz-heatmap-row-label\">" + (d.weekLabels[weekdayIdx] || "") + "</div>";
-                }
-                html += "</div><div class=\"mnz-heatmap-body\"><div class=\"mnz-heatmap-hours-row\">";
-                for (h = 0; h < 24; h++) html += "<div class=\"mnz-heatmap-hour-label\">" + (d.hourLabels[h] || h) + "</div>";
-                html += "</div>";
-
-                for (wi = 0; wi < 7; wi++) {
-                    var rowWeekday = weekDisplayOrder[wi];
-                    html += "<div class=\"mnz-heatmap-row\">";
-                    for (h = 0; h < 24; h++) {
-                        var v = (wh[rowWeekday] && wh[rowWeekday][h]) || 0;
-                        var intensity = v / maxVal;
-                        var color = intensity > 0 ? (intensity > 0.5 ? (intensity > 0.8 ? "#c0392b" : "#e67e22") : "#27ae60") : barBg;
-                        var cls = v > 0 ? " mnz-heatmap-cell-active" : "";
-                        html += "<div class=\"mnz-heatmap-cell" + cls + "\" data-w=\"" + rowWeekday + "\" data-h=\"" + h + "\" style=\"background:" + color + "\" title=\"" + (d.weekLabels[rowWeekday] || "") + " " + (d.hourLabels[h] || h) + ": " + v + "\">" + v + "</div>";
-                    }
-                    html += "</div>";
-                }
-
-                html += "</div></div>";
-                el.innerHTML = html;
-
-                jQuery("#mnz-investigation-heatmap").off("click.analistPatterns", ".mnz-heatmap-cell-active").on("click.analistPatterns", ".mnz-heatmap-cell-active", function() {
-                    var center = jQuery(this);
-                    var weekday = parseInt(center.data("w"), 10);
-                    var hour = parseInt(center.data("h"), 10);
-                    var filtered = clocks.filter(function(t) {
-                        var dt = d.eventSlots[t];
-                        return dt.weekday === weekday && dt.hour === hour;
-                    });
-                    currentFilter = {type: "heatmap", weekday: weekday, hour: hour};
-                    currentAgg = computeAggregates(filtered);
-                    applyAndRender();
-                });
-            };
-
-            var renderMonthly = function(elId, data, labels) {
-                var el = root.querySelector("#" + elId);
-                if (!el) return;
-                var max = Math.max.apply(Math, data);
-                if (max === 0) max = 1;
-
-                var html = "<div class=\"mnz-investigation-monthly-bars\">";
-                for (var i = 0; i < data.length; i++) {
-                    var h = (data[i] / max) * 100;
-                    var col = data[i] > 0 ? (i === data.length - 1 ? "#ff9800" : barFill) : barBg;
-                    var cls = data[i] > 0 ? " mnz-bar-clickable" : "";
-
-                    html += "<div class=\"mnz-investigation-monthly-item" + cls + "\" data-index=\"" + i + "\" data-type=\"monthly\" title=\"" + labels[i] + ": " + data[i] + "\">";
-                    html += "<div style=\"font-size:11px;font-weight:bold;color:" + textColor + "\">" + data[i] + "</div>";
-                    html += "<div class=\"mnz-investigation-monthly-bar\" style=\"height:" + Math.max(h, 4) + "px;background:" + col + "\"></div>";
-                    html += "<span class=\"mnz-investigation-monthly-label\" style=\"color:" + labelColor + "\">" + labels[i] + "</span>";
-                    html += "</div>";
-                }
-                html += "</div>";
-                el.innerHTML = html;
-            };
-
-            var renderDrilldown = function(containerId, data, labels, title, barColor) {
-                var c = root.querySelector("#" + containerId);
-                if (!c) return;
-                var max = Math.max.apply(Math, data);
-                if (max === 0) max = 1;
-
-                var html = "<div class=\"mnz-drilldown-content\"><div class=\"mnz-drilldown-title\">" + title + "</div><div class=\"mnz-drilldown-subhint\">" + (d.hintDay || "") + "</div><div class=\"mnz-drilldown-chart\"><div class=\"mnz-investigation-bars\">";
-                for (var i = 0; i < data.length; i++) {
-                    var barH = (data[i] / max) * 80;
-                    var day = i + 1;
-                    var cls = data[i] > 0 ? " mnz-drilldown-day-bar mnz-bar-clickable" : "";
-                    var dayData = data[i] > 0 ? " data-day=\"" + day + "\"" : "";
-                    html += "<div class=\"mnz-investigation-bar-item mnz-drilldown-bar-item" + cls + "\"" + dayData + " title=\"" + labels[i] + ": " + data[i] + "\">";
-                    html += "<span class=\"mnz-drilldown-bar-value\">" + data[i] + "</span>";
-                    html += "<div class=\"mnz-investigation-bar\" style=\"height:" + Math.max(barH, 4) + "px;background:" + (data[i] > 0 ? barColor : barBg) + "\"></div>";
-                    html += "<span class=\"mnz-investigation-bar-label\">" + labels[i] + "</span>";
-                    html += "</div>";
-                }
-                html += "</div></div><button type=\"button\" class=\"btn btn-alt mnz-drilldown-close\">Close</button></div>";
-                c.innerHTML = html;
-                c.classList.add("mnz-drilldown-visible");
-            };
-
-            var countSameSlotLastWeek = function(weekday, hour) {
-                var lastWeekEnd = d.lastWeekEnd;
-                var lastWeekStart = d.lastWeekStart;
-                var n = 0;
-
-                for (var i = 0; i < clocks.length; i++) {
-                    var t = clocks[i];
-                    if (t >= lastWeekStart && t < lastWeekEnd) {
-                        var dt = d.eventSlots[t];
-                        if (dt.weekday === weekday && dt.hour === hour) n++;
-                    }
-                }
-
-                return n;
-            };
-
-            var countSameDayLastWeek = function(weekday) {
-                var lastWeekEnd = d.lastWeekEnd;
-                var lastWeekStart = d.lastWeekStart;
-                var n = 0;
-
-                for (var i = 0; i < clocks.length; i++) {
-                    var t = clocks[i];
-                    if (t >= lastWeekStart && t < lastWeekEnd) {
-                        var dt = d.eventSlots[t];
-                        if (dt.weekday === weekday) n++;
-                    }
-                }
-
-                return n;
-            };
-
-            var updateFilterBar = function() {
-                var fb = root.querySelector("#" + "mnz-investigation-filter-bar");
-                if (!fb) return;
-
-                if (!currentFilter) {
-                    fb.innerHTML = "";
-                    fb.classList.remove("mnz-filter-active");
-                    return;
-                }
-
-                var label = "";
-                var compHtml = "";
-                if (currentFilter.type === "month") {
-                    label = (d.monthLabels || [])[currentFilter.value] || "";
-                }
-                else if (currentFilter.type === "day") {
-                    label = (currentFilter.dateStr || "") + " (" + ((d.weekLabels || [])[currentFilter.weekday] || "") + ")";
-                    var lastWeek = countSameDayLastWeek(currentFilter.weekday);
-                    compHtml = " <span class=\"mnz-filter-comparison\">" + (d.sameDayLastWeek || "") + ": " + lastWeek + " " + (d.incidents || "incidents") + "</span>";
-                }
-                else if (currentFilter.type === "heatmap") {
-                    label = (d.weekLabels || [])[currentFilter.weekday] + " " + ((d.hourLabels || [])[currentFilter.hour] || (currentFilter.hour + "h"));
-                    var slotWeek = countSameSlotLastWeek(currentFilter.weekday, currentFilter.hour);
-                    compHtml = " <span class=\"mnz-filter-comparison\">" + (d.sameSlotLastWeek || "") + ": " + slotWeek + " " + (d.incidents || "incidents") + "</span>";
-                }
-
-                fb.classList.add("mnz-filter-active");
-                fb.innerHTML = "<span class=\"mnz-filter-label\">" + (d.filteredBy || "Filtered by") + ": " + label + "</span>" + compHtml + " <button type=\"button\" class=\"btn btn-alt mnz-filter-clear\">" + (d.clearFilter || "Clear filter") + "</button>";
-
-                jQuery("#mnz-investigation-filter-bar .mnz-filter-clear").off("click.analistPatterns").on("click.analistPatterns", function() {
-                    currentFilter = null;
-                    currentAgg = computeAggregates(clocks);
-                    var m = jQuery("#mnz-monthly-drilldown");
-                    m.removeClass("mnz-drilldown-visible").empty().append("<div class=\"mnz-drilldown-hint mnz-drilldown-hint-monthly\">" + (d.hintMonth || "") + "</div>");
-                    applyAndRender();
-                });
-            };
-
-            var applyAndRender = function() {
-                currentAgg = currentAgg || computeAggregates(clocks);
-
-                createCSSBarChart("#hourly-pattern-chart", currentAgg.hourly, d.hourLabels || hourLabels, "#0275b8");
-                createCSSBarChart("#weekly-pattern-chart", currentAgg.weekly, d.weekLabels || weekdayLabels, "#28a745");
-                renderHeatmap(currentAgg);
-                renderMonthly("mnz-investigation-monthly-chart", currentAgg.monthly, d.monthLabels || []);
-
-                var dayLabels = (d.dayLabels && d.dayLabels.length) ? d.dayLabels.slice(0) : [];
-                while (dayLabels.length < 31) dayLabels.push(dayLabels.length + 1);
-
-                jQuery("#mnz-investigation-monthly-chart").off("click.analistPatterns", ".mnz-bar-clickable").on("click.analistPatterns", ".mnz-bar-clickable", function() {
-                    var idx = parseInt(jQuery(this).data("index"), 10);
-                    var mk = monthKeys[idx];
-                    if (!mk) return;
-
-                    var filtered = clocks.filter(function(t) {
-                        var dt = d.eventSlots[t];
-                        return dt.month === mk;
-                    });
-                    currentFilter = {type: "month", value: idx};
-                    currentAgg = computeAggregates(filtered);
-                    applyAndRender();
-
-                    var dd = currentAgg.monthlyDailyDetails[idx];
-                    if (dd) {
-                        renderDrilldown("mnz-monthly-drilldown", dd, dayLabels, "Daily distribution - " + (d.monthLabels[idx] || ""), barFill);
-                        jQuery("#mnz-monthly-drilldown .mnz-drilldown-close").off("click.analistPatterns").on("click.analistPatterns", function() {
-                            var c = jQuery("#mnz-monthly-drilldown");
-                            c.removeClass("mnz-drilldown-visible").empty().append("<div class=\"mnz-drilldown-hint mnz-drilldown-hint-monthly\">" + (d.hintMonth || "") + "</div>");
-                        });
-                    }
-
-                    jQuery("#mnz-monthly-drilldown").off("click.analistPatterns", ".mnz-drilldown-day-bar").on("click.analistPatterns", ".mnz-drilldown-day-bar", function() {
-                        var day = parseInt(jQuery(this).data("day"), 10);
-                        if (!day) return;
-
-                        var dateStr = mk + "-" + String(day).padStart(2, "0");
-                        var dayFiltered = clocks.filter(function(t) {
-                            var dt = d.eventSlots[t];
-                            var ds = dt.date;
-                            return ds === dateStr;
-                        });
-
-                        var parts = dateStr.split("-");
-                        var sampleDate = new Date(Date.UTC(parseInt(parts[0], 10), parseInt(parts[1], 10) - 1, parseInt(parts[2], 10)));
-                        var weekday = sampleDate.getUTCDay();
-                        var hourly = [];
-                        var wh = [];
-                        for (var h = 0; h < 24; h++) hourly[h] = 0;
-                        for (var w = 0; w < 7; w++) {
-                            wh[w] = [];
-                            for (h = 0; h < 24; h++) wh[w][h] = 0;
-                        }
-                        for (var cIdx = 0; cIdx < dayFiltered.length; cIdx++) {
-                            var dtf = d.eventSlots[dayFiltered[cIdx]];
-                            hourly[dtf.hour]++;
-                        }
-                        for (h = 0; h < 24; h++) wh[weekday][h] = hourly[h];
-
-                        currentFilter = {type: "day", monthIdx: idx, day: day, weekday: weekday, dateStr: dateStr};
-                        currentAgg = {
-                            hourly: hourly,
-                            weekly: [0, 0, 0, 0, 0, 0, 0],
-                            monthly: currentAgg.monthly,
-                            weeklyHourlyDetails: wh,
-                            monthlyDailyDetails: currentAgg.monthlyDailyDetails
-                        };
-
-                        createCSSBarChart("#hourly-pattern-chart", currentAgg.hourly, d.hourLabels || hourLabels, "#0275b8");
-                        renderHeatmap(currentAgg);
-                        updateFilterBar();
-                        root.querySelector("#mnz-investigation-heatmap").scrollIntoView({block: "nearest"});
-                    });
-                });
-
-                updateFilterBar();
-            };
-
-            currentAgg = computeAggregates(clocks);
-            applyAndRender();
-            return applyAndRender;
-        };
-
-
-        const renderAdvanced = initAdvancedTimePatterns();
-        if (!renderAdvanced) createPatternCharts();
-        return {redraw: renderAdvanced || createPatternCharts};
+            event.preventDefault();
+            cells.forEach((button, i) => { button.tabIndex = i === next ? 0 : -1; });
+            cells[next].focus();
+        }, {signal: lifecycle.signal});
+        render();
+        return {redraw: render, destroy: () => lifecycle.abort()};
     }
 
     function createServiceUi(popup) {
@@ -709,6 +374,8 @@
             this.historyRequests = new Map();
             this.graphOptions = {};
             this.graphRequest = null;
+            this.patternOptions = {};
+            this.patternRequest = null;
             this.timelineRequest = null;
             root.addEventListener('click', event => this.onClick(event), {signal: this.lifecycle.signal});
             root.addEventListener('keydown', event => this.onKeyDown(event), {signal: this.lifecycle.signal});
@@ -716,6 +383,15 @@
                 if (event.target.matches('[data-services-search]')) this.serviceUi.filterServices(event.target.value);
             }, {signal: this.lifecycle.signal});
             root.addEventListener('change', event => {
+                if (event.target.matches('[data-pattern-period]')) {
+                    const form = event.target.closest('[data-pattern-controls]');
+                    const custom = event.target.value === 'custom';
+                    form.querySelector('[data-pattern-custom-range]').hidden = !custom;
+                    form.querySelector('[type="submit"]').hidden = !custom;
+                    this.scheduleLayout();
+                    if (!custom) this.updatePatterns(form);
+                    return;
+                }
                 if (!event.target.matches('[data-graph-period], [data-graph-layout]')) return;
                 const form = event.target.closest('[data-graph-controls]');
                 if (!form) return;
@@ -727,6 +403,12 @@
                 if (!custom || event.target.matches('[data-graph-layout]')) this.updateGraphs(form);
             }, {signal: this.lifecycle.signal});
             root.addEventListener('submit', event => {
+                if (event.target.matches('[data-pattern-controls]')) {
+                    event.preventDefault();
+                    event.stopPropagation();
+                    this.updatePatterns(event.target);
+                    return;
+                }
                 if (!event.target.matches('[data-graph-controls]')) return;
                 event.preventDefault();
                 event.stopPropagation();
@@ -818,7 +500,7 @@
         }
 
         onClick(event) {
-            const button = event.target.closest('[data-tab-target], [data-retry-tab], [data-service-action], [data-problem-action], [data-history-more], [data-timeline-more], .mnz-pattern-toggle');
+            const button = event.target.closest('[data-tab-target], [data-retry-tab], [data-service-action], [data-problem-action], [data-history-more], [data-timeline-more]');
             if (!button || !this.root.contains(button)) return;
             if (button.dataset.tabTarget) {
                 event.preventDefault();
@@ -838,16 +520,6 @@
             } else if (button.dataset.problemAction) {
                 event.preventDefault();
                 this.updateProblem(button.dataset.problemAction);
-            } else {
-                event.preventDefault();
-                const target = Array.from(this.root.querySelectorAll('.mnz-pattern-collapsible-body'))
-                    .find(body => body.id === button.dataset.target);
-                if (!target) return;
-                const expanded = target.style.display === 'none';
-                target.style.display = expanded ? 'block' : 'none';
-                button.textContent = expanded ? this.config.collapseLabel : this.config.expandLabel;
-                button.setAttribute('aria-expanded', String(expanded));
-                if (expanded) this.patternRenderer?.redraw();
             }
         }
 
@@ -901,16 +573,16 @@
             this.dataVersion++;
             this.timelineRequest = null;
             if (this.activeTab !== 'graphs') this.graphOptions = {};
+            if (this.activeTab !== 'patterns') this.patternOptions = {};
+            this.patternRequest = null;
             this.graphRequest = null;
             if (this.recoveryTimer !== null) window.clearTimeout(this.recoveryTimer);
             this.recoveryTimer = null;
             for (const request of this.requests) request.abort();
             this.historyRequests.clear();
             this.tabs.clear();
+            this.patternRenderer?.destroy();
             this.patternRenderer = null;
-            if (window.jQuery) {
-                window.jQuery(this.root).find('*').addBack().off('.analistPatterns').stop(true, true);
-            }
             for (const panel of this.panels.values()) {
                 panel.replaceChildren();
                 panel.removeAttribute('aria-busy');
@@ -953,6 +625,7 @@
                 if (this.config.eventData.hostid) params.hostid = this.config.eventData.hostid;
             }
             if (key === 'graphs') Object.assign(params, this.graphOptions);
+            if (key === 'patterns') Object.assign(params, this.patternOptions);
             state.promise = this.fetchJson(action, params).then(result => {
                 if (this.closed || this.tabs.get(key) !== state) return;
                 if (key === 'services') {
@@ -981,7 +654,7 @@
                     }
                     if (key === 'patterns') {
                         if (!result.pattern_data) throw new Error('Invalid pattern response');
-                        this.patternRenderer = initializePatterns(this.root, result.pattern_data);
+                        this.patternRenderer = initializePatterns(this.root, result.pattern_data, () => this.scheduleLayout());
                     }
                 }
                 state.loaded = true;
@@ -1017,6 +690,47 @@
             } finally {
                 this.requests.delete(controller);
             }
+        }
+
+        updatePatterns(form) {
+            if (this.closed || !this.root.contains(form)) return Promise.resolve();
+            if (this.patternRequest) return this.patternRequest;
+            const options = {pattern_period: form.querySelector('[name="pattern_period"]').value};
+            if (options.pattern_period === 'custom') {
+                options.pattern_from = form.querySelector('[data-pattern-from] input').value;
+                options.pattern_to = form.querySelector('[data-pattern-to] input').value;
+            }
+            const version = this.dataVersion;
+            const state = this.tabs.get('patterns');
+            const select = form.querySelector('[name="pattern_period"]');
+            const submit = form.querySelector('[type="submit"]');
+            const message = form.querySelector('[data-pattern-message]');
+            select.disabled = submit.disabled = true;
+            form.setAttribute('aria-busy', 'true');
+            message.textContent = '';
+            const request = this.fetchJson('problemanalist.tab.get', {
+                eventid: this.config.eventData.eventid, tab: 'patterns', ...options
+            }).then(result => {
+                if (this.closed || version !== this.dataVersion || this.tabs.get('patterns') !== state) return;
+                if (typeof result.body !== 'string' || !result.pattern_data) throw new Error('Invalid pattern response');
+                this.patternRenderer?.destroy();
+                this.panels.get('patterns').innerHTML = result.body;
+                this.patternRenderer = initializePatterns(this.root, result.pattern_data, () => this.scheduleLayout());
+                this.patternOptions = options;
+                this.scheduleLayout();
+            }).catch(error => {
+                if (!this.closed && version === this.dataVersion && error.name !== 'AbortError'
+                        && this.root.contains(form)) message.textContent = error.message;
+            }).finally(() => {
+                if (this.patternRequest === request) this.patternRequest = null;
+                if (!this.closed && version === this.dataVersion && this.root.contains(form)) {
+                    select.disabled = submit.disabled = false;
+                    form.removeAttribute('aria-busy');
+                    this.scheduleLayout();
+                }
+            });
+            this.patternRequest = request;
+            return request;
         }
 
         updateGraphs(form) {
@@ -1290,14 +1004,14 @@
             this.commentButton?.remove();
             for (const controller of this.requests) controller.abort();
             this.requests.clear();
-            if (window.jQuery) {
-                window.jQuery(this.root).find('*').addBack().off('.analistPatterns').stop(true, true);
-            }
             this.tabs.clear();
             this.historyRequests.clear();
             this.graphRequest = null;
             this.graphOptions = {};
             this.timelineRequest = null;
+            this.patternRequest = null;
+            this.patternOptions = {};
+            this.patternRenderer?.destroy();
             this.patternRenderer = null;
             AnalistProblemPopup.instances.delete(this);
         }

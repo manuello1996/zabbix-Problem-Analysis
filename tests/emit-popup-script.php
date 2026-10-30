@@ -125,6 +125,24 @@ if (in_array($scenario, ['timeline-page', 'timeline-more-page', 'timeline-final-
     }
 }
 $last_timeline_event = $timeline_events ? $timeline_events[count($timeline_events) - 1] : null;
+$pattern_timeline = ['period' => '12', 'from' => '2025-04-01 00:00:00', 'to' => '2026-03-31 12:00:00',
+    'from_ts' => strtotime('2025-04-01 00:00:00'), 'to_ts' => $event['clock']];
+if (in_array($scenario, ['patterns-custom', 'patterns-rich'])) {
+    $pattern_timeline = ['period' => 'custom', 'from' => '2026-02-01 00:00:00', 'to' => '2026-03-31 12:00:00',
+        'from_ts' => strtotime('2026-02-01 00:00:00'), 'to_ts' => $event['clock']];
+}
+$pattern_events = [['clock' => strtotime('2026-03-30 00:30:00')]];
+if ($scenario === 'patterns-rich') {
+    foreach (['2026-02-02 08:10:00', '2026-02-02 08:10:00', '2026-02-02 09:15:00',
+            '2026-03-02 08:20:00', '2026-03-03 08:00:00'] as $date) {
+        $pattern_events[] = ['clock' => strtotime($date)];
+    }
+}
+if ($scenario === 'patterns-short') {
+    $pattern_timeline['period'] = '1';
+    $pattern_timeline['from'] = '2026-03-01 00:00:00';
+    $pattern_timeline['from_ts'] = strtotime($pattern_timeline['from']);
+}
 $view = new CView('problemanalist.view', [
     'initial_tab' => $scenario === 'timeline-start' ? 'timeline' : 'overview',
     'tab' => $argv[1] ?? 'overview', 'event' => $event,
@@ -135,7 +153,8 @@ $view = new CView('problemanalist.view', [
     'can_comment' => in_array($scenario, ['permitted', 'acknowledged', 'comment-only']),
     'can_close' => in_array($scenario, ['permitted', 'acknowledged']),
     'can_change_severity' => in_array($scenario, ['permitted', 'acknowledged']),
-    'pattern_events' => [['clock' => strtotime('2026-03-30 00:30:00')]],
+    'pattern_events' => $scenario === 'patterns-empty' ? [] : $pattern_events,
+    'pattern_timeline' => $pattern_timeline,
     'operational_data' => ['value' => '', 'history' => $scenario === 'history-preview'
         ? [['item' => $history_item, 'values' => $history_values]] : []],
     'history_item' => $history_item, 'history_values' => $history_values, 'history_has_more' => true,

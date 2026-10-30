@@ -48,7 +48,10 @@ class CControllerAnalistProblemPopup extends CController {
             'graph_period'  => 'in around,before,duration,day,custom',
             'graph_layout'  => 'in items,combined',
             'graph_from'    => 'range_time',
-            'graph_to'      => 'range_time'
+            'graph_to'      => 'range_time',
+            'pattern_period' => 'in 1,3,6,12,custom',
+            'pattern_from' => 'range_time',
+            'pattern_to' => 'range_time'
         ];
 
         $ret = $this->validateInput($fields);
@@ -75,6 +78,12 @@ class CControllerAnalistProblemPopup extends CController {
                 && $this->getInput('graph_period', 'around') === 'custom') {
             $ret = $this->validateInput(array_replace($fields, [
                 'graph_from' => 'required|range_time', 'graph_to' => 'required|range_time'
+            ]));
+        }
+        if ($ret && $this->getInput('tab', 'overview') === 'patterns'
+                && $this->getInput('pattern_period', '12') === 'custom') {
+            $ret = $this->validateInput(array_replace($fields, [
+                'pattern_from' => 'required|range_time', 'pattern_to' => 'required|range_time'
             ]));
         }
 
@@ -277,19 +286,26 @@ class CControllerAnalistProblemPopup extends CController {
 
         // Get problem events for Time Patterns.
         $pattern_events = [];
+        $pattern_timeline = null;
         if ($tab === 'patterns' && $actual_triggerid > 0) {
-            // Get problem events from the last 12 months for Time Patterns/Heatmap.
-            $pattern_time_till = isset($event['clock']) ? (int)$event['clock'] : time();
-            $pattern_time_from = strtotime('-11 months', strtotime(date('Y-m-01 00:00:00', $pattern_time_till)));
+            try {
+                $pattern_timeline = $this->getPatternTimeline($event);
+            }
+            catch (\Exception $exception) {
+                $this->setResponse((new CControllerResponseData(['main_block' => json_encode([
+                    'error' => ['messages' => [$exception->getMessage()]]
+                ])]))->disableView());
+                return;
+            }
 
             $pattern_events = API::Event()->get([
                 'output'    => ['clock'],
-                'source'    => 0, // EVENT_SOURCE_TRIGGERS
-                'object'    => 0, // EVENT_OBJECT_TRIGGER
+                'source'    => EVENT_SOURCE_TRIGGERS,
+                'object'    => EVENT_OBJECT_TRIGGER,
                 'objectids' => $actual_triggerid,
-                'time_from' => $pattern_time_from,
-                'time_till' => $pattern_time_till,
-                'value'     => 1, // Only problem events
+                'time_from' => $pattern_timeline['from_ts'],
+                'time_till' => $pattern_timeline['to_ts'],
+                'value'     => TRIGGER_VALUE_TRUE,
                 'sortfield' => 'clock',
                 'sortorder' => 'DESC'
             ]);
@@ -459,6 +475,7 @@ class CControllerAnalistProblemPopup extends CController {
             'trigger' => $trigger,
             'host' => $host,
             'pattern_events' => $pattern_events,
+            'pattern_timeline' => $pattern_timeline,
             'items' => $items,
             'monthly_comparison' => $monthly_comparison,
             'timeline_page' => $timeline_page,
@@ -752,6 +769,34 @@ class CControllerAnalistProblemPopup extends CController {
         $host['tags'] = $tags;
 
         return $host;
+    }
+
+    private function getPatternTimeline(array $event): array {
+        $period = $this->getInput('pattern_period', '12');
+        if ($period === 'custom') {
+            $from = $this->getInput('pattern_from');
+            $to = $this->getInput('pattern_to');
+            $parser = new CRangeTimeParser();
+            if ($parser->parse($from) !== CParser::PARSE_SUCCESS) throw new \RuntimeException(_('Invalid start time.'));
+            $from_ts = $parser->getDateTime(true)->getTimestamp();
+            if ($parser->parse($to) !== CParser::PARSE_SUCCESS) throw new \RuntimeException(_('Invalid end time.'));
+            $to_ts = $parser->getDateTime(false)->getTimestamp();
+            if ($from_ts < 0 || $to_ts > ZBX_MAX_INT32 || $from_ts > $to_ts) {
+                throw new \RuntimeException(_('The end time must not precede the start time.'));
+            }
+            if ($to_ts - $from_ts + 1 > CTimePeriodHelper::getMaxPeriod()) {
+                throw new \RuntimeException(_('The selected period exceeds the maximum time period configured in Zabbix.'));
+            }
+        }
+        else {
+            // Include the selected event's month and the preceding calendar months, as before.
+            $to_ts = (int) $event['clock'];
+            $month_start = strtotime(date('Y-m-01 00:00:00', $to_ts));
+            $from_ts = max(0, strtotime('-'.((int) $period - 1).' months', $month_start));
+            $from = date(ZBX_FULL_DATE_TIME, $from_ts);
+            $to = date(ZBX_FULL_DATE_TIME, $to_ts);
+        }
+        return compact('period', 'from', 'to', 'from_ts', 'to_ts');
     }
 
     private function getGraphTimeline(array $event): array {

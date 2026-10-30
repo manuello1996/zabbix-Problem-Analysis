@@ -532,31 +532,30 @@ try { $event_page(); throw new Exception('A failed history query must not look l
 catch (RuntimeException $exception) {}
 API::$timeline_events = null;
 
-// Evaluate the view’s actual calendar preparation without rendering a Zabbix page.
-$view = file_get_contents(dirname(__DIR__).'/views/problemanalist.view.php');
-$start = strpos($view, '$current_time =');
-$end = strpos($view, '// Generate hour labels', $start);
-$calendar = substr($view, $start, $end - $start);
-$start = strpos($view, '$event_clocks =');
-$end = strpos($view, '// Create patterns container', $start);
-if ($end === false) $end = strpos($view, '$patterns_container =', $start);
-// Stop after the reference-week calculation.
-$end = strpos($view, '$pattern_week_start =', $start);
-$end = strpos($view, ';', $end) + 1;
-$slots = substr($view, $start, $end - $start);
+// Calendar data follows the selected range and the frontend timezone.
+require dirname(__DIR__).'/includes/PatternData.php';
 date_default_timezone_set('Europe/Zurich');
 foreach (['2026-03-31', '2024-02-29', '2026-12-31'] as $date) {
-    $event = ['clock' => strtotime($date.' 12:00:00')];
-    $monthly_data = $month_keys = $monthly_daily_details = [];
-    eval($calendar);
-    check(count($month_keys) === 12 && count(array_unique($month_keys)) === 12, 'Month-end charts must contain twelve distinct months');
+    $end = strtotime($date.' 12:00:00');
+    $start = strtotime('-11 months', strtotime(date('Y-m-01 00:00:00', $end)));
+    $calendar = \Modules\AnalistProblem\PatternData::build([], $start, $end, $end);
+    check(count($calendar['monthKeys']) === 12 && count(array_unique($calendar['monthKeys'])) === 12,
+        'Month-end patterns must contain twelve distinct months');
 }
-$event = ['clock' => strtotime('2026-03-31 12:00:00')];
-$monthly_data = $month_keys = $monthly_daily_details = [];
-eval($calendar);
-$pattern_events = [['clock' => strtotime('2026-03-30 00:30:00')]];
-eval($slots);
-check($event_slots[(string) $pattern_events[0]['clock']]['date'] === '2026-03-30', 'Buckets use frontend timezone near midnight');
-check($pattern_week_end - $pattern_week_start === 601200, 'Previous calendar week respects the DST transition');
-check($pattern_week_end <= $event['clock'], 'Historical comparisons must end before the selected event');
+$end = strtotime('2026-03-31 12:00:00');
+$clock = strtotime('2026-03-30 00:30:00');
+$calendar = \Modules\AnalistProblem\PatternData::build([['clock' => $clock], ['clock' => $clock]],
+    strtotime('2026-02-01'), $end, $end);
+$slots = (array) $calendar['eventSlots'];
+check($slots[(string) $clock]['date'] === '2026-03-30', 'Buckets use frontend timezone near midnight');
+check($calendar['weeklyHourlyDetails'][1][0] === 2, 'Same-second occurrences remain separate counts');
+check($calendar['monthDays'] === [28, 31], 'Day drilldowns use the actual calendar month length');
+check($calendar['lastWeekEnd'] - $calendar['lastWeekStart'] === 601200, 'Previous calendar week respects the DST transition');
+check($calendar['lastWeekEnd'] <= $end, 'Historical comparisons must end before the selected event');
+$leap = \Modules\AnalistProblem\PatternData::build([], strtotime('2024-02-01'), strtotime('2024-02-29 23:59:59'), $end);
+check($leap['monthDays'] === [29], 'Leap-year February includes exactly twenty-nine days');
+$filtered = \Modules\AnalistProblem\PatternData::build([['clock' => $clock - 1], ['clock' => $clock], ['clock' => $clock + 1]],
+    $clock, $clock, $clock);
+check($filtered['eventClocks'] === [$clock], 'Custom boundaries are inclusive and exclude out-of-range events');
+
 echo "PHP regression checks passed.\n";

@@ -4,6 +4,7 @@ import path from 'node:path';
 import vm from 'node:vm';
 import {spawnSync} from 'node:child_process';
 import {fileURLToPath, URLSearchParams} from 'node:url';
+import {runPatternChecks} from './patterns.mjs';
 
 export async function runRegression(fixture, asset, popupAsset, fragments = {}, actionFixtures = {}) {
     const {inline} = fixture;
@@ -37,7 +38,23 @@ export async function runRegression(fixture, asset, popupAsset, fragments = {}, 
         assert.equal(fragment.response.body.includes('chart.php'), tab === 'graphs');
         assert.equal(fragment.inline, '', 'Lazy fragments must not mount additional popup instances');
     }
-    if (fragments.patterns) assert.equal(fragments.patterns.response.pattern_data.eventClocks.length, 1);
+    if (fragments.patterns) {
+        const {body, pattern_data: data} = fragments.patterns.response;
+        assert.equal(data.eventClocks.length, 1);
+        assert(body.includes('<z-select') && body.includes('toggleCalendar('), 'Pattern filters use native selects and calendars');
+        assert.equal((body.match(/data-pattern-slot="/g) || []).length, 168);
+        assert.equal((body.match(/data-pattern-toggle="/g) || []).length, 2, 'Hourly/weekday charts retain the original Expand controls');
+        assert(body.includes('mnz-heatmap-grid') && body.includes('mnz-investigation-monthly-bars'));
+        assert(!body.includes('analist-heatmap-table') && !body.includes('analist-heatmap-legend'),
+            'The compact original heatmap replaces the native table presentation');
+        assert(body.match(/<button[^>]*data-pattern-apply=""[^>]*>/)[0].includes('hidden="hidden"'));
+        assert(body.includes('Europe/Zurich') && body.includes('2025-04-01'));
+    }
+    if (actionFixtures['patterns-rich']) {
+        runPatternChecks(actionFixtures['patterns-rich'], actionFixtures['patterns-empty'], popupAsset);
+        assert.equal(actionFixtures['patterns-short'].response.pattern_data.monthKeys.length, 1);
+        assert(!actionFixtures['patterns-custom'].response.body.match(/<button[^>]*data-pattern-apply=""[^>]*>/)[0].includes('hidden="hidden"'));
+    }
     if (fragments.graphs) {
         assert(fragments.graphs.response.body.includes('width="800"'));
         assert(fragments.graphs.response.body.includes('height="300"'), 'Graph images reserve space before loading');
@@ -290,24 +307,6 @@ export async function runRegression(fixture, asset, popupAsset, fragments = {}, 
     assert.equal(serviceUi.getServiceStatusClass(2), 'status-warning-bg');
     assert.equal(serviceUi.getServiceStatusClass(3), 'status-average-bg');
 
-    // Exercise the actual aggregation and last-week functions without browser timezone conversions.
-    const pattern = {d: {eventSlots: {100: {hour: 23, weekday: 1, month: '2026-03', day: 30},
-        200: {hour: 0, weekday: 2, month: '2026-03', day: 31}}, lastWeekStart: 50, lastWeekEnd: 150},
-        monthKeys: ['2026-03'], clocks: [100, 200]};
-    vm.createContext(pattern);
-    let start = popupAsset.indexOf('var computeAggregates =');
-    let end = popupAsset.indexOf('var renderHeatmap =', start);
-    vm.runInContext(popupAsset.slice(start, end), pattern);
-    const aggregates = pattern.computeAggregates([100, 200]);
-    assert.equal(aggregates.hourly[23], 1);
-    assert.equal(aggregates.hourly[0], 1);
-    assert.equal(aggregates.monthly[0], 2);
-    start = popupAsset.indexOf('var countSameSlotLastWeek =');
-    end = popupAsset.indexOf('var updateFilterBar =', start);
-    vm.runInContext(popupAsset.slice(start, end), pattern);
-    assert.equal(pattern.countSameSlotLastWeek(1, 23), 1);
-    assert.equal(pattern.countSameDayLastWeek(2), 0);
-
     // Exercise the popup controller with pending network requests and independent DOM roots.
     class Target {
         constructor() { this.handlers = new Map(); }
@@ -373,7 +372,8 @@ export async function runRegression(fixture, asset, popupAsset, fragments = {}, 
             }
         });
         root.servicesTree = new Panel('');
-        root.querySelector = selector => selector === '[data-problem-comment]' ? (root.commentRendered ? root.comment : null)
+        root.querySelector = selector => selector === '[data-pattern-view]' ? null
+            : selector === '[data-problem-comment]' ? (root.commentRendered ? root.comment : null)
             : selector === '[data-comment-message]' ? (root.commentRendered ? root.commentMessage : null)
             : selector === '[data-comment-form]' ? (root.commentRendered ? root.commentForm : null)
             : selector === '#services-tree-container' ? root.servicesTree : root.message;
@@ -879,6 +879,81 @@ export async function runRegression(fixture, asset, popupAsset, fragments = {}, 
     assert(pending[index].options.signal.aborted && eventsPopup.timelineRequest === null,
         'Close cancels pending event pages');
 
+    const patternRoot = popupRoot(); roots.set('pattern-controls', patternRoot);
+    const patternPopup = Popup.mount({...config, rootId: 'pattern-controls'});
+    const patternResponse = fragments.patterns.response;
+    index = pending.length;
+    loading = patternPopup.activateTab('patterns');
+    pending[index].resolve(patternResponse); await loading;
+    const patternForm = new Panel(''); patternForm.popupRoot = patternRoot;
+    patternForm.matches = selector => selector === '[data-pattern-controls]';
+    const patternPeriod = {value: '12', disabled: false,
+        matches: selector => selector.includes('[data-pattern-period]'), closest: () => patternForm};
+    const patternCustom = {hidden: true}, patternApply = {disabled: false, hidden: true};
+    const patternFrom = {value: 'now-6M'}, patternTo = {value: 'now'};
+    const patternMessage = {textContent: ''};
+    const patternFields = {'[name="pattern_period"]': patternPeriod, '[data-pattern-custom-range]': patternCustom,
+        '[data-pattern-from] input': patternFrom, '[data-pattern-to] input': patternTo,
+        '[type="submit"]': patternApply, '[data-pattern-message]': patternMessage};
+    patternForm.querySelector = selector => patternFields[selector];
+    for (const period of ['1', '3', '6', '12']) {
+        index = pending.length;
+        patternPeriod.value = period;
+        patternRoot.dispatch('change', {target: patternPeriod});
+        const applying = patternPopup.patternRequest;
+        assert(applying && patternApply.hidden && patternCustom.hidden, 'Pattern presets apply immediately without Apply');
+        assert.equal(pending[index].options.body.get('pattern_period'), period);
+        assert(patternPeriod.disabled && !patternRoot.cancelButton.disabled);
+        pending[index].resolve(patternResponse); await applying;
+        assert(!patternPeriod.disabled && !patternApply.disabled);
+    }
+    patternPeriod.value = 'custom';
+    index = pending.length;
+    patternRoot.dispatch('change', {target: patternPeriod});
+    assert.equal(pending.length, index, 'Custom waits for Apply');
+    assert(!patternApply.hidden && !patternCustom.hidden);
+    patternRoot.dispatch('submit', {target: patternForm, preventDefault() {}, stopPropagation() {}});
+    let patternLoading = patternPopup.patternRequest;
+    assert.equal(patternPopup.updatePatterns(patternForm), patternLoading, 'Duplicate custom submissions share a request');
+    assert.equal(pending[index].options.body.get('pattern_from'), 'now-6M');
+    assert.equal(pending[index].options.body.get('pattern_to'), 'now');
+    pending[index].resolve({error: {messages: ['Invalid pattern period']}}); await patternLoading;
+    assert.equal(patternMessage.textContent, 'Invalid pattern period');
+    assert.equal(patternPopup.panels.get('patterns').innerHTML, patternResponse.body,
+        'Failed periods keep the existing heatmap and filters visible');
+    assert.equal(patternFrom.value, 'now-6M');
+    index = pending.length;
+    patternLoading = patternPopup.updatePatterns(patternForm);
+    await patternPopup.activateTab('overview');
+    pending[index].resolve(patternResponse); await patternLoading;
+    assert.equal(patternPopup.activeTab, 'overview', 'A late response never switches tabs');
+    await patternPopup.activateTab('patterns');
+    index = pending.length;
+    reloading = patternPopup.refreshTab();
+    assert.equal(pending[index].options.body.get('pattern_period'), 'custom');
+    assert.equal(pending[index].options.body.get('pattern_from'), 'now-6M', 'Refresh retains the active pattern period');
+    pending[index].resolve(patternResponse); await reloading;
+    index = pending.length;
+    loading = patternPopup.activateTab('overview');
+    pending[index].resolve({body: 'Overview'}); await loading;
+    index = pending.length;
+    reloading = patternPopup.refreshTab();
+    pending[index].resolve({body: 'Overview refreshed'}); await reloading;
+    assert.equal(Object.keys(patternPopup.patternOptions).length, 0, 'Refreshing another tab discards the cached pattern period');
+    index = pending.length;
+    loading = patternPopup.activateTab('patterns');
+    pending[index].resolve(patternResponse); await loading;
+    index = pending.length;
+    patternLoading = patternPopup.updatePatterns(patternForm);
+    reloading = patternPopup.refreshTab();
+    await patternLoading;
+    assert(pending[index].options.signal.aborted, 'Refresh cancels pending pattern changes');
+    pending[index + 1].resolve(patternResponse); await reloading;
+    index = pending.length;
+    patternLoading = patternPopup.updatePatterns(patternForm);
+    patternRoot.dialogue.dispatch('dialogue.close'); await patternLoading;
+    assert(pending[index].options.signal.aborted && patternPopup.patternRequest === null);
+
     const graphRoot = popupRoot(); roots.set('graph-controls', graphRoot);
     const graphPopup = Popup.mount({...config, rootId: 'graph-controls'});
     index = pending.length;
@@ -1178,6 +1253,9 @@ if (typeof process !== 'undefined' && process.argv[1] && path.resolve(process.ar
     actionFixtures['timeline-page'] = render('timeline', 'timeline-page');
     actionFixtures['timeline-more-page'] = render('timeline_events', 'timeline-more-page');
     actionFixtures['timeline-final-page'] = render('timeline_events', 'timeline-final-page');
+    for (const scenario of ['patterns-rich', 'patterns-empty', 'patterns-custom', 'patterns-short']) {
+        actionFixtures[scenario] = render('patterns', scenario);
+    }
     await runRegression(render('overview'), fs.readFileSync(path.join(root, 'assets/js/analist-problem.js'), 'utf8'),
         fs.readFileSync(path.join(root, 'assets/js/analist-popup.js'), 'utf8'), fragments, actionFixtures);
 }
