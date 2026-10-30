@@ -108,8 +108,9 @@ document.addEventListener('DOMContentLoaded', () => {
                 this.addRecurrenceColumnToRow(row, data);
             });
             const columnCount = Array.from(header.cells).reduce((sum, cell) => sum + cell.colSpan, 0);
+            const problemRows = new Set(problems.map(problem => problem.row));
             rows.forEach(row => {
-                if (!row.cells.length || problems.some(problem => problem.row === row)) return;
+                if (!row.cells.length || problemRows.has(row)) return;
                 const count = Array.from(row.cells).reduce((sum, cell) => sum + cell.colSpan, 0);
                 const missing = columnCount - count;
                 if (missing < 1 || missing > 2) return;

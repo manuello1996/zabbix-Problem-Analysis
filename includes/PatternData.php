@@ -5,39 +5,40 @@ namespace Modules\AnalistProblem;
 /** Calendar buckets use the frontend/user timezone, including its DST boundaries. */
 final class PatternData {
     public static function build(array $events, int $from, int $to, int $reference): array {
-        $month_keys = $month_days = [];
-        $monthly = $daily = [];
+        $month_keys = $month_days = $month_indexes = [];
         for ($month = strtotime(date('Y-m-01 00:00:00', $from)); $month <= $to;
                 $month = strtotime('+1 month', $month)) {
             $key = date('Y-m', $month);
+            $month_indexes[$key] = count($month_keys);
             $month_keys[] = $key;
             $month_days[] = (int) date('t', $month);
-            $monthly[$key] = 0;
-            $daily[$key] = array_fill(0, (int) date('t', $month), 0);
         }
-        $hourly = array_fill(0, 24, 0);
-        $weekly = array_fill(0, 7, 0);
         $heatmap = array_fill(0, 7, array_fill(0, 24, 0));
-        $clocks = $slots = [];
+        $last_week = $heatmap;
+        $week_end = strtotime('monday this week 00:00:00', $reference);
+        $week_start = strtotime('-1 week', $week_end);
+        $buckets = [];
+        $total = $scale_max = 0;
         foreach ($events as $event) {
             $clock = (int) $event['clock'];
             if ($clock < $from || $clock > $to) continue;
-            $slot = ['hour' => (int) date('G', $clock), 'weekday' => (int) date('w', $clock),
-                'month' => date('Y-m', $clock), 'day' => (int) date('j', $clock), 'date' => date('Y-m-d', $clock)];
-            $clocks[] = $clock;
-            $slots[(string) $clock] = $slot;
-            $hourly[$slot['hour']]++;
-            $weekly[$slot['weekday']]++;
-            $heatmap[$slot['weekday']][$slot['hour']]++;
-            $monthly[$slot['month']]++;
-            $daily[$slot['month']][$slot['day'] - 1]++;
+            $date = date('Y-m-d', $clock);
+            $hour = (int) date('G', $clock);
+            $key = $date.'-'.$hour;
+            if (!isset($buckets[$key])) {
+                // month index, day of month, weekday, hour, occurrence count.
+                $buckets[$key] = [$month_indexes[substr($date, 0, 7)], (int) substr($date, 8),
+                    (int) date('w', $clock), $hour, 0];
+            }
+            $weekday = $buckets[$key][2];
+            $buckets[$key][4]++;
+            $scale_max = max($scale_max, ++$heatmap[$weekday][$hour]);
+            if ($clock >= $week_start && $clock < $week_end) $last_week[$weekday][$hour]++;
+            $total++;
         }
-        $week_end = strtotime('monday this week 00:00:00', $reference);
-        return ['hourlyData' => $hourly, 'weeklyData' => $weekly, 'weeklyHourlyDetails' => $heatmap,
-            'eventClocks' => $clocks, 'eventSlots' => (object) $slots,
+        return ['buckets' => array_values($buckets), 'total' => $total, 'scaleMax' => $scale_max,
             'monthKeys' => $month_keys, 'monthDays' => $month_days,
-            'monthlyData' => array_values($monthly), 'monthlyDailyDetails' => array_values($daily),
             'fromTs' => $from, 'toTs' => $to,
-            'lastWeekStart' => strtotime('-1 week', $week_end), 'lastWeekEnd' => $week_end];
+            'lastWeekCounts' => $last_week, 'lastWeekStart' => $week_start, 'lastWeekEnd' => $week_end];
     }
 }

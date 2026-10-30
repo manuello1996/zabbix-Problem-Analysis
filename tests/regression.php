@@ -11,8 +11,11 @@ require $ui_root.'/include/actions.inc.php';
 require $ui_root.'/include/hosts.inc.php';
 require $ui_root.'/include/classes/core/CAutoloader.php';
 $autoload = new CAutoloader();
-$autoload->addNamespace('', [$ui_root.'/include/classes/parsers']);
+$autoload->addNamespace('', [$ui_root.'/include/classes/parsers', $ui_root.'/include/classes/helpers']);
 $autoload->register();
+$settings = new ReflectionProperty(CSettingsHelper::class, 'params');
+$settings->setAccessible(true);
+$settings->setValue(null, [CSettingsHelper::MAX_PERIOD => '2y']);
 
 set_error_handler(static function ($severity, $message, $file, $line) {
     throw new ErrorException($message, 0, $severity, $file, $line);
@@ -99,12 +102,16 @@ class ApiFixture {
                 if (API::$item_history === false) return false;
                 $rows = array_values(array_filter(API::$item_history, static function ($row) use ($options) {
                     return in_array((string) $row['itemid'], array_map('strval', $options['itemids']), true)
-                        && (int) $row['clock'] <= $options['time_till'];
+                        && (int) $row['clock'] <= $options['time_till']
+                        && (!isset($options['time_from']) || (int) $row['clock'] >= $options['time_from'])
+                        && (!isset($options['filter']['ns']) || in_array($row['ns'], $options['filter']['ns']));
                 }));
                 usort($rows, static function ($a, $b) {
                     return ($b['clock'] <=> $a['clock']) ?: ($b['ns'] <=> $a['ns']);
                 });
-                return array_slice($rows, 0, $options['limit']);
+                return array_map(static function ($row) use ($options) {
+                    return array_intersect_key($row, array_flip($options['output']));
+                }, array_slice($rows, 0, $options['limit']));
             case 'host':
                 if (($options['selectInventory'] ?? []) === ['notes']) {
                     $hosts = array_filter(API::$hosts, static function ($host) use ($options) {
@@ -354,12 +361,31 @@ foreach (['patterns', 'timeline'] as $tab) {
         return $call[0] === 'event' && isset($call[1]['time_from']);
     });
     check(count($ranges) === 1, 'Each historical tab must request only its own range');
+    check(!array_filter(API::$calls, static function ($call) { return $call[0] === 'trigger'; }),
+        'Historical tabs skip unused parent trigger enrichment');
+    check($tab !== 'patterns' || !isset(array_values($ranges)[0][1]['sortfield']),
+        'Time pattern counts do not sort raw events');
     API::$history = false;
     $failed = new ProblemControllerFixture(['eventid' => '1', 'tab' => $tab]);
     $failed->run();
     check(isset(json_decode($failed->response->getData()['main_block'], true)['error']), 'Range failures must remain retryable errors');
     API::$history = [];
 }
+// Graph rendering must not request item last values, value maps or expanded expressions.
+API::$trigger = ['triggerid' => '7', 'hosts' => [], 'items' => [['itemid' => '10']]];
+API::$calls = [];
+(new ProblemControllerFixture(['eventid' => '1', 'tab' => 'graphs']))->run();
+$graph_queries = array_column(API::$calls, 1, 0);
+check($graph_queries['item']['output'] === ['itemid', 'name', 'value_type']
+    && $graph_queries['item']['selectValueMap'] === null && !$graph_queries['trigger']['expandExpression'],
+    'Graphs fetch item metadata without reading history or expanding expressions');
+API::$trigger = null;
+API::$event['r_eventid'] = '2';
+API::$calls = [];
+(new ProblemControllerFixture(['eventid' => '1', 'tab' => 'patterns']))->run();
+check(count(API::$calls) === 2 && API::$calls[0][1]['selectTags'] === null,
+    'Time patterns skip unused recovery and tag lookups for resolved events');
+API::$event['r_eventid'] = '0';
 $history_event = $data['event'];
 $history_event['r_eventid'] = '2';
 $recovery_alert = ['eventid' => '2', 'clock' => 121, 'alerttype' => ALERT_TYPE_MESSAGE,
@@ -457,7 +483,10 @@ $page = $more_history(100, 500);
 check(array_column($page['history_values'], 'ns') === [400, 300, 200], 'More loads exactly three older values, including within the same second');
 check($page['history_has_more'] && $page['history_cursor'] === ['clock' => 100, 'ns' => 200], 'Cursor points to the last returned value');
 $queries = array_values(array_filter(API::$calls, static function ($call) { return $call[0] === 'item_history'; }));
-check(count($queries) === 2 && $queries[0][1]['limit'] === 4, 'History reads one lookahead value and expands only at a shared timestamp');
+check(count($queries) === 3 && $queries[0][1]['limit'] === 4
+    && $queries[0][1]['output'] === ['ns'] && $queries[1][1]['output'] === ['ns']
+    && $queries[2][1]['filter']['ns'] === [400, 300, 200, 100],
+    'Same-second seeks expand metadata only, then fetch three values and one lookahead');
 check($queries[0][1]['history'] === ITEM_VALUE_TYPE_UINT64 && $queries[0][1]['sortfield'] === ['clock', 'ns'], 'Use the server item type and stable timestamp ordering');
 $page = $more_history(100, 200);
 check(array_column($page['history_values'], 'clock') === [100, 99, 99], 'Following batches neither skip nor repeat values');
@@ -465,6 +494,28 @@ $page = $more_history(99, 0);
 check(count($page['history_values']) === 1 && !$page['history_has_more'], 'The final partial batch hides More');
 $page = $more_history(98, 0);
 check($page['history_values'] === [] && $page['history_cursor'] === null && !$page['history_has_more'], 'Exhausted history returns an empty final batch');
+// Dense log/text history must not refetch large values while seeking a nanosecond cursor.
+$saved_history = API::$item_history;
+API::$items[0]['value_type'] = ITEM_VALUE_TYPE_TEXT;
+API::$item_history = [];
+for ($ns = 2000; $ns >= 1; $ns--) {
+    API::$item_history[] = ['itemid' => '10', 'clock' => 100, 'ns' => $ns, 'value' => str_repeat('x', 65536)];
+}
+API::$calls = [];
+$page = $more_history(100, 10);
+check(array_column($page['history_values'], 'ns') === [9, 8, 7] && $page['history_has_more'],
+    'Dense text history preserves the cursor and lookahead');
+$value_limit = 0;
+foreach (API::$calls as [$kind, $options]) {
+    if ($kind !== 'item_history') continue;
+    check($options['history'] === ITEM_VALUE_TYPE_TEXT, 'Dense history uses the native text backend');
+    if (in_array('value', $options['output'], true)) $value_limit += $options['limit'];
+    else check($options['time_from'] === 100 && $options['time_till'] === 100,
+        'Metadata expansion stays within the cursor second');
+}
+check($value_limit === 4, 'History transfers at most four value payloads per page, regardless of cursor depth');
+API::$item_history = $saved_history;
+API::$items[0]['value_type'] = ITEM_VALUE_TYPE_UINT64;
 API::$calls = [];
 $page = $more_history(100, 500, '999');
 check(isset(json_decode($page['main_block'], true)['error']), 'An unrelated item cannot be loaded through an event');
@@ -546,9 +597,8 @@ $end = strtotime('2026-03-31 12:00:00');
 $clock = strtotime('2026-03-30 00:30:00');
 $calendar = \Modules\AnalistProblem\PatternData::build([['clock' => $clock], ['clock' => $clock]],
     strtotime('2026-02-01'), $end, $end);
-$slots = (array) $calendar['eventSlots'];
-check($slots[(string) $clock]['date'] === '2026-03-30', 'Buckets use frontend timezone near midnight');
-check($calendar['weeklyHourlyDetails'][1][0] === 2, 'Same-second occurrences remain separate counts');
+check($calendar['buckets'] === [[1, 30, 1, 0, 2]], 'Buckets use the frontend timezone and preserve same-second occurrences');
+check($calendar['total'] === 2 && $calendar['scaleMax'] === 2, 'Counts and heatmap scale include every occurrence');
 check($calendar['monthDays'] === [28, 31], 'Day drilldowns use the actual calendar month length');
 check($calendar['lastWeekEnd'] - $calendar['lastWeekStart'] === 601200, 'Previous calendar week respects the DST transition');
 check($calendar['lastWeekEnd'] <= $end, 'Historical comparisons must end before the selected event');
@@ -556,6 +606,18 @@ $leap = \Modules\AnalistProblem\PatternData::build([], strtotime('2024-02-01'), 
 check($leap['monthDays'] === [29], 'Leap-year February includes exactly twenty-nine days');
 $filtered = \Modules\AnalistProblem\PatternData::build([['clock' => $clock - 1], ['clock' => $clock], ['clock' => $clock + 1]],
     $clock, $clock, $clock);
-check($filtered['eventClocks'] === [$clock], 'Custom boundaries are inclusive and exclude out-of-range events');
+check($filtered['total'] === 1 && $filtered['buckets'] === [[0, 30, 1, 0, 1]],
+    'Custom boundaries are inclusive and exclude out-of-range events');
+$repeated_hour = \Modules\AnalistProblem\PatternData::build([
+    ['clock' => strtotime('2026-10-25T02:30:00+02:00')], ['clock' => strtotime('2026-10-25T02:30:00+01:00')]
+], strtotime('2026-10-01'), strtotime('2026-10-31'), strtotime('2026-10-31'));
+check($repeated_hour['buckets'] === [[0, 25, 0, 2, 2]] && $repeated_hour['lastWeekCounts'][0][2] === 2,
+    'Both occurrences of the repeated DST hour contribute to the same local slot and previous week');
+$dense_events = [];
+$start = strtotime('2026-03-01');
+for ($i = 0; $i < 43200; $i++) $dense_events[] = ['clock' => $start + $i * 60];
+$dense = \Modules\AnalistProblem\PatternData::build($dense_events, $start, $end, $end);
+check($dense['total'] === 43200 && count($dense['buckets']) <= 720 && strlen(json_encode($dense)) < 20000,
+    'Pattern payload grows by occupied calendar hours instead of raw event count');
 
 echo "PHP regression checks passed.\n";

@@ -121,7 +121,7 @@ class CControllerAnalistProblemPopup extends CController {
                 'severity', 'opdata', 'r_eventid'
             ],
             'eventids' => $eventid,
-            'selectTags' => ['tag', 'value'],
+            'selectTags' => $tab === 'overview' ? ['tag', 'value'] : null,
             'selectAcknowledges' => $tab === 'update' ? ['acknowledgeid', 'clock', 'userid', 'message', 'action',
                 'old_severity', 'new_severity', 'suppress_until'
             ] : null
@@ -173,7 +173,7 @@ class CControllerAnalistProblemPopup extends CController {
 
         $recovery_eventid = (int) ($event['r_eventid'] ?? 0);
 
-        if ($recovery_eventid > 0) {
+        if ($recovery_eventid > 0 && in_array($tab, ['overview', 'graphs'], true)) {
             $recovery_events = API::Event()->get([
                 'output' => ['eventid', 'clock'],
                 'eventids' => $recovery_eventid
@@ -188,7 +188,7 @@ class CControllerAnalistProblemPopup extends CController {
         $trigger = null;
         $actual_triggerid = $event['objectid'];
 
-        if ($actual_triggerid > 0 && in_array($tab, ['overview', 'host', 'timeline', 'graphs'], true)) {
+        if ($actual_triggerid > 0 && in_array($tab, ['overview', 'host', 'graphs'], true)) {
             $triggers = API::Trigger()->get([
                 'output' => ['triggerid', 'description', 'expression', 'comments', 'priority', 'opdata', 'manual_close',
                     'recovery_mode', 'recovery_expression', 'type', 'status'
@@ -196,8 +196,8 @@ class CControllerAnalistProblemPopup extends CController {
                 'triggerids' => $actual_triggerid,
                 'selectHosts' => ['hostid', 'host', 'name'],
                 'selectItems' => in_array($tab, ['overview', 'graphs'], true)
-                    ? ['itemid', 'hostid', 'name', 'key_'] : null,
-                'expandExpression' => true
+                    ? ['itemid'] : null,
+                'expandExpression' => $tab === 'overview'
             ]);
             $trigger = $triggers ? $triggers[0] : null;
         }
@@ -306,8 +306,6 @@ class CControllerAnalistProblemPopup extends CController {
                 'time_from' => $pattern_timeline['from_ts'],
                 'time_till' => $pattern_timeline['to_ts'],
                 'value'     => TRIGGER_VALUE_TRUE,
-                'sortfield' => 'clock',
-                'sortorder' => 'DESC'
             ]);
             if ($pattern_events === false) {
                 $this->setResponse((new CControllerResponseData(['main_block' => json_encode([
@@ -328,12 +326,12 @@ class CControllerAnalistProblemPopup extends CController {
                 $unique_itemids = array_unique($trigger_itemids);
 
                 $trigger_items = API::Item()->get([
-                    'output' => ['itemid', 'name', 'key_', 'hostid', 'value_type', 'units', 'lastvalue', 'lastclock',
-                        'valuemapid'
-                    ],
+                    'output' => $tab === 'overview'
+                        ? ['itemid', 'name', 'key_', 'hostid', 'value_type', 'units', 'lastvalue', 'lastclock', 'valuemapid']
+                        : ['itemid', 'name', 'value_type'],
                     'itemids' => $unique_itemids,
                     'monitored' => true,
-                    'selectValueMap' => ['mappings']
+                    'selectValueMap' => $tab === 'overview' ? ['mappings'] : null
                 ]);
 
                 // Use itemid as key to prevent any potential duplicates.
@@ -862,25 +860,35 @@ class CControllerAnalistProblemPopup extends CController {
         $ns = (int) $this->getInput('before_ns');
         $older = [];
         try {
-            $limit = 4;
-            // Read one extra value to decide whether another batch is available.
-            // Expand only when values at the cursor's second fill the query, preserving nanosecond order.
-            if ($clock > 0 || $ns > 0) {
+            $query = ['history' => (int) $item['value_type'], 'itemids' => [$itemid],
+                'sortfield' => ['clock', 'ns'], 'sortorder' => ZBX_SORT_DOWN];
+            if ($ns > 0) {
+                // The native API has no nanosecond range filter. Seek within just this second,
+                // fetching timestamps only so dense text/log history does not repeat large values.
+                $limit = 4;
                 do {
-                    $rows = API::History()->get([
-                        'output' => ['itemid', 'clock', 'ns', 'value'],
-                        'history' => (int) $item['value_type'], 'itemids' => [$itemid],
-                        'time_till' => $ns === 0 ? $clock - 1 : $clock,
-                        'sortfield' => ['clock', 'ns'], 'sortorder' => ZBX_SORT_DOWN, 'limit' => $limit
-                    ]);
+                    $rows = API::History()->get($query + ['output' => ['ns'],
+                        'time_from' => $clock, 'time_till' => $clock, 'limit' => $limit]);
                     if (!is_array($rows)) throw new \RuntimeException('History lookup failed');
-                    $older = array_values(array_filter($rows, static function (array $row) use ($clock, $ns): bool {
-                        return (int) $row['clock'] < $clock
-                            || ((int) $row['clock'] === $clock && (int) $row['ns'] < $ns);
+                    $timestamps = array_values(array_filter($rows, static function (array $row) use ($ns): bool {
+                        return (int) $row['ns'] < $ns;
                     }));
                     $full = count($rows) === $limit;
                     $limit *= 2;
-                } while (count($older) < 4 && $full);
+                } while (count($timestamps) < 4 && $full);
+                if ($timestamps) {
+                    $older = API::History()->get($query + ['output' => ['itemid', 'clock', 'ns', 'value'],
+                        'time_from' => $clock, 'time_till' => $clock,
+                        'filter' => ['ns' => array_column(array_slice($timestamps, 0, 4), 'ns')], 'limit' => 4]);
+                    if (!is_array($older)) throw new \RuntimeException('History lookup failed');
+                }
+            }
+            // One lookahead value determines whether another page is available.
+            if ($clock > 0 && count($older) < 4) {
+                $rows = API::History()->get($query + ['output' => ['itemid', 'clock', 'ns', 'value'],
+                    'time_till' => $clock - 1, 'limit' => 4 - count($older)]);
+                if (!is_array($rows)) throw new \RuntimeException('History lookup failed');
+                $older = array_merge($older, $rows);
             }
         }
         catch (\Exception $exception) {
@@ -972,115 +980,4 @@ class CControllerAnalistProblemPopup extends CController {
         return $data;
     }
 
-    private function getSystemMetricsAtEventTime($host, $event_timestamp) {
-        $hostid = $host['hostid'];
-        $interfaces = $host['interfaces'] ?? [];
-
-        // Determine monitoring type based on main interface
-        $monitoring_type = $this->getHostMonitoringType($interfaces);
-
-        $metrics = [
-            'type' => $monitoring_type,
-            'available' => false,
-            'categories' => []
-        ];
-
-        // Only proceed if we have Zabbix Agent
-        if ($monitoring_type !== 'agent') {
-            return $metrics;
-        }
-
-        try {
-            // Get essential system metrics for Zabbix Agent (using lastvalue)
-            $metrics_list = $this->getEssentialSystemMetrics($hostid);
-            $metrics['categories'] = $metrics_list;
-
-            $metrics['available'] = !empty($metrics_list);
-
-        } catch (Exception $e) {
-            error_log('Error getting system metrics: ' . $e->getMessage());
-        }
-
-        return $metrics;
-    }
-
-    /**
-     * Determine monitoring type based on host interfaces
-     */
-    private function getHostMonitoringType($interfaces) {
-        if (empty($interfaces)) {
-            return 'unknown';
-        }
-
-        // Find main interface
-        foreach ($interfaces as $interface) {
-            if ($interface['main'] == 1) {
-                switch ($interface['type']) {
-                    case 1: return 'agent';    // Zabbix Agent
-                    case 2: return 'snmp';     // SNMP
-                    case 3: return 'ipmi';     // IPMI
-                    case 4: return 'jmx';      // JMX
-                    default: return 'unknown';
-                }
-            }
-        }
-
-        return 'unknown';
-    }
-
-    /**
-     * Get essential system metrics for Zabbix Agent: CPU, Memory, Load, Disk /
-     */
-    private function getEssentialSystemMetrics($hostid) {
-        $metrics = [];
-
-        // Define flexible patterns for different Zabbix versions
-        $metric_patterns = [
-            //'CPU' => ['system.cpu.util', 'system.cpu.utilization'],
-            //'Memory' => ['vm.memory.util', 'vm.memory.size[available]', 'vm.memory.size[total]'],
-            //'Load' => ['system.cpu.load[percpu,avg1]', 'system.cpu.load[,avg5]', 'system.cpu.load'],
-            'Uptime' => ['system.uptime', 'system.hw.uptime[hrSystemUptime.0]'],
-            'Os' => ['vfs.file.contents[/etc/os-release]', 'system.sw.os'],
-            '/data' => ['vfs.fs.dependent.size[/data,pused]'],
-            '/' => ['vfs.fs.dependent.size[/,pused]']
-        ];
-
-        // Search for each category using multiple patterns
-        foreach ($metric_patterns as $category => $patterns) {
-            $found_item = null;
-
-            foreach ($patterns as $pattern) {
-                $items = API::Item()->get([
-                    'output' => ['itemid', 'name', 'key_', 'units', 'lastvalue', 'lastclock'],
-                    'hostids' => $hostid,
-                    'search' => ['key_' => $pattern],
-                    'monitored' => true,
-                    'filter' => [
-                        'value_type' => [ITEM_VALUE_TYPE_FLOAT, ITEM_VALUE_TYPE_UINT64]
-                    ],
-                    'limit' => 1
-                ]);
-
-                if (!empty($items)) {
-                    $found_item = $items[0];
-                    break; // Use first matching pattern
-                }
-            }
-
-            if ($found_item) {
-                // Simply get the last value from the item
-                $metric_data = [
-                    'name' => $found_item['name'],
-                    'key' => $found_item['key_'],
-                    'units' => $found_item['units'] ?? '',
-                    'category' => $category,
-                    'last_value' => $found_item['lastvalue'] ?? 'N/A'
-                ];
-
-                $metrics[] = $metric_data;
-            }
-        }
-
-        return $metrics;
-    }
 }

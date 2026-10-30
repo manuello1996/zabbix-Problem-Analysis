@@ -26,6 +26,25 @@ $active_tab = $data['tab'] ?? 'overview';
 $panels = [];
 $pattern_data = null;
 
+if ($active_tab === 'timeline_events') {
+    $page = $data['timeline_page'];
+    echo json_encode([
+        'body' => implode('', array_map(static function ($row) { return $row->toString(); },
+            createAnalistTimelineRows($page['events']))),
+        'has_more' => $page['has_more'], 'cursor' => $page['cursor']
+    ]);
+    return;
+}
+
+if ($active_tab === 'history') {
+    $rows = createAnalistHistoryRows($data['history_values'], $data['history_item']);
+    echo json_encode([
+        'body' => implode('', array_map(static function ($row) { return $row->toString(); }, $rows)),
+        'has_more' => $data['history_has_more'], 'cursor' => $data['history_cursor']
+    ]);
+    return;
+}
+
 // Format timestamps
 $event_time = isset($event['clock']) ? zbx_date2str(DATE_TIME_FORMAT_SECONDS, $event['clock']) : '';
 $event_details_url = null;
@@ -118,89 +137,6 @@ if ($problem_actions['canAcknowledge']) {
         ->addClass('btn-alt')->setAttribute('data-problem-action', $is_acknowledged ? 'unacknowledge' : 'acknowledge'));
 }
 
-/**
- * Create essential metrics table for Zabbix Agent hosts
- */
-function createEssentialMetricsTable($metrics) {
-    $table = new CTableInfo();
-    $table->setHeader([_('Metric'), _('Last Value')]);
-
-    if (empty($metrics)) {
-        $no_data_row = new CRow([
-            new CCol(_('No system metrics available'), null, 2)
-        ]);
-        $no_data_row->addClass('system-metrics-more');
-        $table->addRow($no_data_row);
-        return $table;
-    }
-
-    // Helper: format seconds -> "Xd HH:MM:SS"
-    $formatUptime = static function (int $seconds): string {
-        if ($seconds < 0) {
-            $seconds = 0;
-        }
-        $days    = intdiv($seconds, 86400);
-        $hours   = intdiv($seconds % 86400, 3600);
-        $minutes = intdiv($seconds % 3600, 60);
-        $secs    = $seconds % 60;
-
-        $parts = [];
-        if ($days > 0) {
-            $parts[] = $days.'d';
-        }
-        $parts[] = sprintf('%02d:%02d:%02d', $hours, $minutes, $secs);
-        return implode(' ', $parts);
-    };
-
-    foreach ($metrics as $metric) {
-        $name       = $metric['name'] ?? '';
-        $category   = $metric['category'] ?? '';
-        $key        = $metric['key'] ?? '';
-        $last_value = $metric['last_value'] ?? '';
-        $units      = trim((string)($metric['units'] ?? ''));
-        $suffix     = ($units !== '') ? (' ' . $units) : '';
-
-        $value_display = '';
-
-        // Treat as uptime if categorized as Uptime OR key matches known uptime keys.
-        $is_uptime = ($category === 'Uptime')
-            || preg_match('/^system\.uptime\b|^system\.hw\.uptime\b/i', (string)$key);
-
-        if ($is_uptime && is_numeric($last_value)) {
-            $value_display = $formatUptime((int)$last_value);  // no units for uptime
-        }
-        elseif (is_numeric($last_value)) {
-            $num = (float)$last_value;
-
-            if ($num >= 1_000_000_000) {
-                $value_display = number_format($num / 1_000_000_000, 1) . 'G' . $suffix;
-            }
-            elseif ($num >= 1_000_000) {
-                $value_display = number_format($num / 1_000_000, 1) . 'M' . $suffix;
-            }
-            elseif ($num >= 1_000) {
-                $value_display = number_format($num / 1_000, 1) . 'K' . $suffix;
-            }
-            else {
-                // Keep small numbers with two decimals; for percentages/ratios this looks good.
-                $value_display = number_format($num, 2) . $suffix;
-            }
-        }
-        else {
-            $value_display = (string)$last_value . $suffix;
-        }
-
-        $row = new CRow([
-            $name,
-            $value_display
-        ]);
-
-        $table->addRow($row);
-    }
-
-    return $table;
-}
-
 function createAnalistHistoryValue($value, array $item) {
     if ((int) ($item['value_type'] ?? -1) === ITEM_VALUE_TYPE_BINARY) {
         return italic(_('binary value'))->addClass(ZBX_STYLE_GREY);
@@ -251,9 +187,9 @@ function createAnalistTimelineRows(array $events): array {
     foreach ($events as &$event) $event['r_clock'] = $recoveries[$event['r_eventid']]['clock'] ?? 0;
     unset($event);
     $actions = getEventsActionsIconsData($events, $triggers);
-    $users = API::User()->get([
+    $users = $actions['userids'] ? API::User()->get([
         'output' => ['username', 'name', 'surname'], 'userids' => array_keys($actions['userids']), 'preservekeys' => true
-    ]);
+    ]) : [];
     $allowed = [
         'add_comments' => CWebUser::checkAccess(CRoleHelper::ACTIONS_ADD_PROBLEM_COMMENTS),
         'change_severity' => CWebUser::checkAccess(CRoleHelper::ACTIONS_CHANGE_SEVERITY),
@@ -289,25 +225,6 @@ function createAnalistTimelineRows(array $events): array {
         ]))->setAttribute('data-timeline-event', $event['eventid']);
     }
     return $rows;
-}
-
-if ($active_tab === 'timeline_events') {
-    $page = $data['timeline_page'];
-    echo json_encode([
-        'body' => implode('', array_map(static function ($row) { return $row->toString(); },
-            createAnalistTimelineRows($page['events']))),
-        'has_more' => $page['has_more'], 'cursor' => $page['cursor']
-    ]);
-    return;
-}
-
-if ($active_tab === 'history') {
-    $rows = createAnalistHistoryRows($data['history_values'], $data['history_item']);
-    echo json_encode([
-        'body' => implode('', array_map(static function ($row) { return $row->toString(); }, $rows)),
-        'has_more' => $data['history_has_more'], 'cursor' => $data['history_cursor']
-    ]);
-    return;
 }
 
 function createOperationalDataSection(array $operational_data): CDiv {

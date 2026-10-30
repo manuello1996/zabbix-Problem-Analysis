@@ -3,6 +3,7 @@ import vm from 'node:vm';
 
 // Small DOM fixtures exercise the real renderer against PHP-emitted button metadata.
 class Node {
+    static queries = 0;
     constructor(attributes = {}) {
         this.attributes = {...attributes}; this.dataset = {}; this.style = {}; this.handlers = new Map();
         this.textContent = ''; this.hidden = false; this.fields = {};
@@ -16,7 +17,7 @@ class Node {
     hasAttribute(name) { return Object.hasOwn(this.attributes, name); }
     matches(selector) { return selector.split(',').some(part => this.hasAttribute(part.trim().slice(1, -1))); }
     closest(selector) { return this.matches(selector) ? this : null; }
-    querySelector(selector) { return this.fields[selector] || null; }
+    querySelector(selector) { Node.queries++; return this.fields[selector] || null; }
     addEventListener(name, callback, options) {
         this.handlers.set(name, callback);
         options.signal.addEventListener('abort', () => this.handlers.delete(name));
@@ -44,7 +45,7 @@ function patternDOM(fixture) {
             item.fields['[data-pattern-bar]'] = new Node();
         }
         charts[kind] = items;
-        panel.fields['[data-pattern-bars="' + kind + '"]'] = {querySelectorAll: () => items};
+        panel.fields['[data-pattern-bars="' + kind + '"]'] = {querySelectorAll() { Node.queries++; return items; }};
     }
     for (const key of ['filter', 'filter-label', 'status', 'days', 'day-title']) {
         panel.fields['[data-pattern-' + key + ']'] = new Node();
@@ -53,7 +54,7 @@ function patternDOM(fixture) {
         const body = new Node(); body.hidden = true;
         panel.fields['[data-pattern-body="' + kind + '"]'] = body;
     }
-    panel.querySelectorAll = selector => selector === '[data-pattern-slot]' ? slots : [];
+    panel.querySelectorAll = selector => { Node.queries++; return selector === '[data-pattern-slot]' ? slots : []; };
     panel.contains = () => true;
     const clear = buttons.find(button => button.hasAttribute('data-pattern-clear'));
     return {panel, slots, charts, clear,
@@ -72,6 +73,7 @@ export function runPatternChecks(fixture, emptyFixture, asset) {
     const initialize = vm.runInNewContext(asset.slice(start, end) + '\ninitializePatterns;', {AbortController});
     const dom = patternDOM(fixture);
     const renderer = initialize(dom.root, fixture.response.pattern_data);
+    const queriesAfterMount = Node.queries;
     assert.equal(dom.status(), 'All occurrences: 6');
     assert.equal(dom.slot(1, 8).textContent, '3', 'Same-second occurrences retain their full count');
     dom.click(dom.charts.month[0]);
@@ -96,6 +98,7 @@ export function runPatternChecks(fixture, emptyFixture, asset) {
     assert.equal(dom.status(), 'No occurrences match the selected filters.');
     dom.click(dom.clear);
     assert.equal(dom.status(), 'All occurrences: 6');
+    assert.equal(Node.queries, queriesAfterMount, 'Filtering reuses mounted heatmap and chart nodes without scanning the DOM again');
     dom.click(dom.toggle);
     assert.equal(dom.toggle.textContent, 'Collapse');
     assert(!dom.panel.fields['[data-pattern-body="hour"]'].hidden);

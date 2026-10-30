@@ -4,46 +4,43 @@
         const panel = root.querySelector('[data-pattern-view]');
         if (!panel) return null;
         const lifecycle = new AbortController();
-        var clocks = (d.eventClocks || []).map(Number);
-        var monthKeys = d.monthKeys;
         const filters = {month: null, day: null, weekday: null, hour: null};
         let daysOpen = false;
         const select = selector => panel.querySelector(selector);
-        const all = selector => Array.from(panel.querySelectorAll(selector));
-        var computeAggregates = function(clockList) {
+        const cells = Array.from(panel.querySelectorAll('[data-pattern-slot]'));
+        const filterBar = select('[data-pattern-filter]'), filterLabel = select('[data-pattern-filter-label]');
+        const status = select('[data-pattern-status]'), days = select('[data-pattern-days]');
+        const dayTitle = select('[data-pattern-day-title]');
+        const charts = Object.fromEntries(['month', 'day', 'hour', 'weekday'].map(kind => [kind,
+            Array.from(select('[data-pattern-bars="' + kind + '"]').querySelectorAll('[data-pattern-index]'), item => ({
+                item, index: Number(item.dataset.patternIndex), count: item.querySelector('[data-pattern-count]'),
+                bar: item.querySelector('[data-pattern-bar]'), interactive: item.hasAttribute('aria-pressed')
+            }))]));
+        const aggregate = () => {
             const hourly = Array(24).fill(0), weekly = Array(7).fill(0);
             const weeklyHourlyDetails = Array.from({length: 7}, () => Array(24).fill(0));
-            const monthly = monthKeys.map(() => 0);
-            const monthlyDailyDetails = monthKeys.map((key, index) => Array(d.monthDays[index]).fill(0));
-            for (const clock of clockList) {
-                const slot = d.eventSlots[clock];
-                hourly[slot.hour]++;
-                weekly[slot.weekday]++;
-                weeklyHourlyDetails[slot.weekday][slot.hour]++;
-                const month = monthKeys.indexOf(slot.month);
-                if (month >= 0) {
-                    monthly[month]++;
-                    monthlyDailyDetails[month][slot.day - 1]++;
-                }
+            const monthly = d.monthKeys.map(() => 0);
+            const monthlyDailyDetails = d.monthDays.map(days => Array(days).fill(0));
+            let total = 0;
+            for (const [month, day, weekday, hour, count] of d.buckets) {
+                if ((filters.month !== null && month !== filters.month) || (filters.day !== null && day !== filters.day)) continue;
+                weeklyHourlyDetails[weekday][hour] += count;
+                if (filters.weekday !== null && (weekday !== filters.weekday || hour !== filters.hour)) continue;
+                hourly[hour] += count;
+                weekly[weekday] += count;
+                monthly[month] += count;
+                monthlyDailyDetails[month][day - 1] += count;
+                total += count;
             }
-            return {hourly, weekly, weeklyHourlyDetails, monthly, monthlyDailyDetails};
+            return {hourly, weekly, weeklyHourlyDetails, monthly, monthlyDailyDetails, total};
         };
-        const rangeAgg = computeAggregates(clocks);
-        const scaleMax = Math.max(0, ...rangeAgg.weeklyHourlyDetails.flat());
-        const matchingClocks = (includeSlot = true) => clocks.filter(clock => {
-            const slot = d.eventSlots[clock];
-            return (filters.month === null || slot.month === monthKeys[filters.month])
-                && (filters.day === null || slot.day === filters.day)
-                && (!includeSlot || filters.weekday === null
-                    || (slot.weekday === filters.weekday && slot.hour === filters.hour));
-        });
-        var renderHeatmap = function(agg) {
-            for (const cell of all('[data-pattern-slot]')) {
+        const renderHeatmap = agg => {
+            for (const cell of cells) {
                 const weekday = Number(cell.dataset.weekday), hour = Number(cell.dataset.hour);
                 const count = agg.weeklyHourlyDetails[weekday][hour];
                 const selected = filters.weekday === weekday && filters.hour === hour;
-                cell.textContent = String(count);
-                const intensity = count / scaleMax;
+                if (cell.textContent !== String(count)) cell.textContent = String(count);
+                const intensity = count / d.scaleMax;
                 cell.dataset.level = count === 0 ? '0' : intensity > 0.8 ? '3' : intensity > 0.5 ? '2' : '1';
                 cell.setAttribute('aria-pressed', String(selected));
                 cell.classList.toggle('is-muted', filters.weekday !== null && !selected);
@@ -53,62 +50,54 @@
                 cell.setAttribute('aria-label', label);
             }
         };
-        var countSameSlotLastWeek = function(weekday, hour) {
-            return clocks.filter(clock => clock >= d.lastWeekStart && clock < d.lastWeekEnd
-                && d.eventSlots[clock].weekday === weekday && d.eventSlots[clock].hour === hour).length;
-        };
-        var updateFilterBar = function(count) {
+        const updateFilterBar = count => {
             const labels = [];
             if (filters.month !== null) labels.push(d.monthLabels[filters.month]);
             if (filters.day !== null) labels.push(String(filters.day));
             if (filters.weekday !== null) labels.push(d.weekLabels[filters.weekday] + ' ' + d.hourLabels[filters.hour]);
-            select('[data-pattern-filter]').hidden = labels.length === 0;
+            filterBar.hidden = labels.length === 0;
             let label = d.filteredBy + ': ' + labels.join(' / ');
             if (filters.weekday !== null && d.lastWeekStart >= d.fromTs && d.lastWeekEnd <= d.toTs) {
-                label += ' · ' + d.sameSlotLastWeek + ': ' + countSameSlotLastWeek(filters.weekday, filters.hour);
+                label += ' · ' + d.sameSlotLastWeek + ': ' + d.lastWeekCounts[filters.weekday][filters.hour];
             }
-            select('[data-pattern-filter-label]').textContent = label;
-            select('[data-pattern-status]').textContent = !clocks.length ? d.noEvents : count === 0 ? d.noMatches
+            filterLabel.textContent = label;
+            status.textContent = !d.total ? d.noEvents : count === 0 ? d.noMatches
                 : (labels.length ? d.selectedOccurrences : d.allOccurrences) + ': ' + count;
-            select('[data-pattern-status]').hidden = count > 0;
+            status.hidden = count > 0;
         };
         const renderBars = (kind, values, labels, active = null) => {
-            const chart = select('[data-pattern-bars="' + kind + '"]');
             const max = Math.max(1, ...values);
-            for (const item of chart.querySelectorAll('[data-pattern-index]')) {
-                const index = Number(item.dataset.patternIndex);
+            for (const {item, index, count: countLabel, bar, interactive} of charts[kind]) {
                 item.hidden = index >= values.length;
                 if (item.hidden) continue;
                 const count = values[index];
-                item.querySelector('[data-pattern-count]').textContent = count > 0 || kind === 'month' || kind === 'day'
-                    ? String(count) : '';
-                const bar = item.querySelector('[data-pattern-bar]');
+                const text = count > 0 || kind === 'month' || kind === 'day' ? String(count) : '';
+                if (countLabel.textContent !== text) countLabel.textContent = text;
                 const height = kind === 'hour' || kind === 'weekday' ? 110 : kind === 'day' ? 80 : 100;
                 bar.style.height = (count / max * height) + 'px';
                 bar.classList.toggle('is-empty', count === 0);
                 item.title = labels[index] + ': ' + count + ' ' + d.incidents;
-                if (item.hasAttribute('aria-pressed')) {
+                if (interactive) {
                     item.setAttribute('aria-pressed', String(index === active));
                     item.setAttribute('aria-label', item.title);
                 }
             }
         };
         const render = () => {
-            const selected = matchingClocks();
-            const agg = computeAggregates(selected);
+            const agg = aggregate();
             // Keep the selected date's heatmap visible as context while a slot filters the distributions.
-            renderHeatmap(computeAggregates(matchingClocks(false)));
+            renderHeatmap(agg);
             renderBars('month', agg.monthly, d.monthLabels, filters.month);
             renderBars('hour', agg.hourly, d.hourLabels);
             renderBars('weekday', agg.weekly, d.weekLabels);
-            select('[data-pattern-days]').hidden = filters.month === null || !daysOpen;
+            days.hidden = filters.month === null || !daysOpen;
             if (filters.month !== null) {
-                select('[data-pattern-day-title]').textContent = d.monthLabels[filters.month];
+                dayTitle.textContent = d.monthLabels[filters.month];
                 renderBars('day', agg.monthlyDailyDetails[filters.month],
                     Array.from({length: d.monthDays[filters.month]}, (_, i) => i + 1),
                     filters.day === null ? null : filters.day - 1);
             }
-            updateFilterBar(selected.length);
+            updateFilterBar(agg.total);
             onLayout();
         };
         panel.addEventListener('click', event => {
@@ -140,14 +129,13 @@
                 const selected = filters.weekday === weekday && filters.hour === hour;
                 filters.weekday = selected ? null : weekday;
                 filters.hour = selected ? null : hour;
-                all('[data-pattern-slot]').forEach(cell => { cell.tabIndex = cell === button ? 0 : -1; });
+                cells.forEach(cell => { cell.tabIndex = cell === button ? 0 : -1; });
             }
             render();
         }, {signal: lifecycle.signal});
         panel.addEventListener('keydown', event => {
             const cell = event.target.closest('[data-pattern-slot]');
             if (!cell) return;
-            const cells = all('[data-pattern-slot]');
             const index = cells.indexOf(cell), column = index % 24;
             let next;
             switch (event.key) {
@@ -628,35 +616,7 @@
             if (key === 'patterns') Object.assign(params, this.patternOptions);
             state.promise = this.fetchJson(action, params).then(result => {
                 if (this.closed || this.tabs.get(key) !== state) return;
-                if (key === 'services') {
-                    if (!result.success || !Array.isArray(result.data)) throw new Error(result.error?.message || 'Unable to load services');
-                    panel.innerHTML = '<div id="services-tree-container" class="services-container"></div>';
-                    if (result.data.length) this.serviceUi.displayServicesTree(result.data);
-                    else this.serviceUi.displayNoServicesMessage();
-                } else {
-                    if (typeof result.body !== 'string') throw new Error('Invalid tab response');
-                    panel.innerHTML = result.body;
-                    if (key === 'update' && result.comment_actions) {
-                        Object.assign(this.config.problemActions, result.comment_actions);
-                    }
-                    if (key === 'overview' && result.problem_actions) {
-                        if (this.waitingForRecovery && !result.problem_actions.recoveryReady) {
-                            result.problem_actions.closingPending = true;
-                        }
-                        this.config.problemActions = result.problem_actions;
-                        if (result.problem_actions.recoveryReady) {
-                            this.waitingForRecovery = false;
-                            if (this.recoveryTimer !== null) window.clearTimeout(this.recoveryTimer);
-                            this.recoveryTimer = null;
-                        } else {
-                            this.trackPendingRecovery();
-                        }
-                    }
-                    if (key === 'patterns') {
-                        if (!result.pattern_data) throw new Error('Invalid pattern response');
-                        this.patternRenderer = initializePatterns(this.root, result.pattern_data, () => this.scheduleLayout());
-                    }
-                }
+                this.renderTab(key, result);
                 state.loaded = true;
                 this.scheduleLayout();
             }).catch(error => {
@@ -672,6 +632,34 @@
                 }
             });
             return state.promise;
+        }
+
+        renderTab(key, result) {
+            const panel = this.panels.get(key);
+            if (key === 'services') {
+                if (!result.success || !Array.isArray(result.data)) throw new Error(result.error?.message || 'Unable to load services');
+                panel.innerHTML = '<div id="services-tree-container" class="services-container"></div>';
+                if (result.data.length) this.serviceUi.displayServicesTree(result.data);
+                else this.serviceUi.displayNoServicesMessage();
+                return;
+            }
+            if (typeof result.body !== 'string') throw new Error('Invalid tab response');
+            if (key === 'patterns' && !Array.isArray(result.pattern_data?.buckets)) throw new Error('Invalid pattern response');
+            if (key === 'patterns') this.patternRenderer?.destroy();
+            panel.innerHTML = result.body;
+            if (key === 'update' && result.comment_actions) Object.assign(this.config.problemActions, result.comment_actions);
+            if (key === 'overview' && result.problem_actions) {
+                if (this.waitingForRecovery && !result.problem_actions.recoveryReady) result.problem_actions.closingPending = true;
+                this.config.problemActions = result.problem_actions;
+                if (result.problem_actions.recoveryReady) {
+                    this.waitingForRecovery = false;
+                    if (this.recoveryTimer !== null) window.clearTimeout(this.recoveryTimer);
+                    this.recoveryTimer = null;
+                } else {
+                    this.trackPendingRecovery();
+                }
+            }
+            if (key === 'patterns') this.patternRenderer = initializePatterns(this.root, result.pattern_data, () => this.scheduleLayout());
         }
 
         async fetchJson(action, params) {
@@ -692,83 +680,43 @@
             }
         }
 
-        updatePatterns(form) {
-            if (this.closed || !this.root.contains(form)) return Promise.resolve();
-            if (this.patternRequest) return this.patternRequest;
-            const options = {pattern_period: form.querySelector('[name="pattern_period"]').value};
-            if (options.pattern_period === 'custom') {
-                options.pattern_from = form.querySelector('[data-pattern-from] input').value;
-                options.pattern_to = form.querySelector('[data-pattern-to] input').value;
-            }
-            const version = this.dataVersion;
-            const state = this.tabs.get('patterns');
-            const select = form.querySelector('[name="pattern_period"]');
-            const submit = form.querySelector('[type="submit"]');
-            const message = form.querySelector('[data-pattern-message]');
-            select.disabled = submit.disabled = true;
-            form.setAttribute('aria-busy', 'true');
-            message.textContent = '';
-            const request = this.fetchJson('problemanalist.tab.get', {
-                eventid: this.config.eventData.eventid, tab: 'patterns', ...options
-            }).then(result => {
-                if (this.closed || version !== this.dataVersion || this.tabs.get('patterns') !== state) return;
-                if (typeof result.body !== 'string' || !result.pattern_data) throw new Error('Invalid pattern response');
-                this.patternRenderer?.destroy();
-                this.panels.get('patterns').innerHTML = result.body;
-                this.patternRenderer = initializePatterns(this.root, result.pattern_data, () => this.scheduleLayout());
-                this.patternOptions = options;
-                this.scheduleLayout();
-            }).catch(error => {
-                if (!this.closed && version === this.dataVersion && error.name !== 'AbortError'
-                        && this.root.contains(form)) message.textContent = error.message;
-            }).finally(() => {
-                if (this.patternRequest === request) this.patternRequest = null;
-                if (!this.closed && version === this.dataVersion && this.root.contains(form)) {
-                    select.disabled = submit.disabled = false;
-                    form.removeAttribute('aria-busy');
-                    this.scheduleLayout();
-                }
-            });
-            this.patternRequest = request;
-            return request;
-        }
+        updatePatterns(form) { return this.updatePeriod(form, 'patterns', 'pattern'); }
+        updateGraphs(form) { return this.updatePeriod(form, 'graphs', 'graph'); }
 
-        updateGraphs(form) {
+        updatePeriod(form, key, prefix) {
             if (this.closed || !this.root.contains(form)) return Promise.resolve();
-            if (this.graphRequest) return this.graphRequest;
-            const options = {
-                graph_period: form.querySelector('[name="graph_period"]').value,
-                graph_layout: form.querySelector('[name="graph_layout"]')?.value ?? 'items'
-            };
-            if (options.graph_period === 'custom') {
-                options.graph_from = form.querySelector('[data-graph-from] input').value;
-                options.graph_to = form.querySelector('[data-graph-to] input').value;
+            const requestKey = prefix + 'Request';
+            if (this[requestKey]) return this[requestKey];
+            const period = form.querySelector('[name="' + prefix + '_period"]');
+            const layout = key === 'graphs' ? form.querySelector('[name="graph_layout"]') : null;
+            const options = {[prefix + '_period']: period.value};
+            if (key === 'graphs') options.graph_layout = layout?.value ?? 'items';
+            if (period.value === 'custom') {
+                options[prefix + '_from'] = form.querySelector('[data-' + prefix + '-from] input').value;
+                options[prefix + '_to'] = form.querySelector('[data-' + prefix + '-to] input').value;
             }
-            const version = this.dataVersion;
-            const state = this.tabs.get('graphs');
+            const version = this.dataVersion, state = this.tabs.get(key);
             const submit = form.querySelector('[type="submit"]');
-            const message = form.querySelector('[data-graph-message]');
-            const selects = [form.querySelector('[name="graph_period"]'), form.querySelector('[name="graph_layout"]')]
-                .filter(Boolean);
+            const message = form.querySelector('[data-' + prefix + '-message]');
+            const selects = [period, layout].filter(Boolean);
             const disabledStates = selects.map(select => select.disabled);
             message.textContent = '';
             submit.disabled = true;
             selects.forEach(select => { select.disabled = true; });
             form.setAttribute('aria-busy', 'true');
             const request = this.fetchJson('problemanalist.tab.get', {
-                eventid: this.config.eventData.eventid, tab: 'graphs', ...options,
+                eventid: this.config.eventData.eventid, tab: key, ...options,
                 ...(this.config.eventData.hostid ? {hostid: this.config.eventData.hostid} : {})
             }).then(result => {
-                if (this.closed || version !== this.dataVersion || this.tabs.get('graphs') !== state) return;
-                if (typeof result.body !== 'string') throw new Error('Invalid graph response');
-                this.panels.get('graphs').innerHTML = result.body;
-                this.graphOptions = options;
+                if (this.closed || version !== this.dataVersion || this.tabs.get(key) !== state) return;
+                this.renderTab(key, result);
+                this[prefix + 'Options'] = options;
                 this.scheduleLayout();
             }).catch(error => {
                 if (!this.closed && version === this.dataVersion && error.name !== 'AbortError'
                         && this.root.contains(form)) message.textContent = error.message;
             }).finally(() => {
-                if (this.graphRequest === request) this.graphRequest = null;
+                if (this[requestKey] === request) this[requestKey] = null;
                 if (!this.closed && version === this.dataVersion && this.root.contains(form)) {
                     submit.disabled = false;
                     selects.forEach((select, index) => { select.disabled = disabledStates[index]; });
@@ -776,7 +724,7 @@
                     this.scheduleLayout();
                 }
             });
-            this.graphRequest = request;
+            this[requestKey] = request;
             return request;
         }
 

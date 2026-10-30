@@ -40,7 +40,7 @@ export async function runRegression(fixture, asset, popupAsset, fragments = {}, 
     }
     if (fragments.patterns) {
         const {body, pattern_data: data} = fragments.patterns.response;
-        assert.equal(data.eventClocks.length, 1);
+        assert.equal(data.total, 1);
         assert(body.includes('<z-select') && body.includes('toggleCalendar('), 'Pattern filters use native selects and calendars');
         assert.equal((body.match(/data-pattern-slot="/g) || []).length, 168);
         assert.equal((body.match(/data-pattern-toggle="/g) || []).length, 2, 'Hourly/weekday charts retain the original Expand controls');
@@ -922,6 +922,12 @@ export async function runRegression(fixture, asset, popupAsset, fragments = {}, 
     assert.equal(patternPopup.panels.get('patterns').innerHTML, patternResponse.body,
         'Failed periods keep the existing heatmap and filters visible');
     assert.equal(patternFrom.value, 'now-6M');
+    index = pending.length;
+    patternLoading = patternPopup.updatePatterns(patternForm);
+    pending[index].resolve({body: 'Incomplete replacement', pattern_data: {}}); await patternLoading;
+    assert.equal(patternMessage.textContent, 'Invalid pattern response');
+    assert.equal(patternPopup.panels.get('patterns').innerHTML, patternResponse.body,
+        'Malformed pattern data is rejected before replacing the working heatmap');
     index = pending.length;
     patternLoading = patternPopup.updatePatterns(patternForm);
     await patternPopup.activateTab('overview');
