@@ -47,6 +47,27 @@ foreach ($history as $name => $value) {
 }
 $validate(['eventid' => '1'], true);
 $validate(['eventid' => '1', 'tab' => 'update'], true);
+$timeline_request = ['eventid' => '100', 'tab' => 'timeline_events', 'before_eventid' => '81', 'before_clock' => '100'];
+if ($validate($timeline_request, true)['before_eventid'] !== '81') {
+    throw new RuntimeException('Timeline paging must retain its validated event cursor');
+}
+foreach (['before_eventid', 'before_clock'] as $field) {
+    $invalid_timeline = $timeline_request;
+    unset($invalid_timeline[$field]);
+    $validate($invalid_timeline, false);
+}
+$validate(array_replace($timeline_request, ['before_eventid' => 'invalid']), false);
+$validate(array_replace($timeline_request, ['before_clock' => '-1']), false);
+$validate(['eventid' => '1', 'initial_tab' => 'timeline'], true);
+$validate(['eventid' => '1', 'initial_tab' => 'invalid'], false);
+$validate(['eventid' => '1', 'tab' => 'recurrences'], true);
+$batch_input = ['eventid' => '1', 'tab' => 'recurrences', 'recurrence_eventids' => ['1', '3']];
+if ($validate($batch_input, true)['recurrence_eventids'] !== ['1', '3']) {
+    throw new RuntimeException('Validated recurrence event IDs must survive the native controller lifecycle');
+}
+$validate(array_replace($batch_input, ['recurrence_eventids' => ['invalid']]), false);
+$validate(array_replace($batch_input, ['recurrence_eventids' => []]), false);
+$validate(array_replace($batch_input, ['recurrence_eventids' => range(1, 41)]), false);
 foreach (['itemid', 'before_clock', 'before_ns'] as $required) {
     $request = $history;
     unset($request[$required]);

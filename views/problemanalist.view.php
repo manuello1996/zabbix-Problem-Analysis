@@ -6,6 +6,7 @@ require_once dirname(__FILE__).'/../../../include/events.inc.php';
 require_once dirname(__FILE__).'/../../../include/actions.inc.php';
 require_once dirname(__FILE__).'/../../../include/users.inc.php';
 require_once dirname(__FILE__).'/../../../include/items.inc.php';
+require_once dirname(__FILE__).'/../../../include/triggers.inc.php';
 $this->addJsFile('layout.mode.js');
 $this->addJsFile('gtlc.js');
 $this->addJsFile('class.calendar.js');
@@ -232,6 +233,72 @@ function createAnalistHistoryRows(array $values, array $item): array {
         ]))->addClass('operational-history-value');
     }
     return $rows;
+}
+
+/** Render paged events with the same native statuses, links and action helpers as make_small_eventlist(). */
+function createAnalistTimelineRows(array $events): array {
+    if (!$events) return [];
+    $events = array_column($events, null, 'eventid');
+    $recovery_ids = array_filter(array_unique(array_column($events, 'r_eventid')));
+    $recoveries = $recovery_ids ? API::Event()->get([
+        'output' => ['clock'], 'source' => EVENT_SOURCE_TRIGGERS, 'object' => EVENT_OBJECT_TRIGGER,
+        'eventids' => array_values($recovery_ids), 'preservekeys' => true
+    ]) : [];
+    $triggers = API::Trigger()->get([
+        'output' => ['priority', 'manual_close'], 'triggerids' => array_unique(array_column($events, 'objectid')),
+        'preservekeys' => true
+    ]);
+    foreach ($events as &$event) $event['r_clock'] = $recoveries[$event['r_eventid']]['clock'] ?? 0;
+    unset($event);
+    $actions = getEventsActionsIconsData($events, $triggers);
+    $users = API::User()->get([
+        'output' => ['username', 'name', 'surname'], 'userids' => array_keys($actions['userids']), 'preservekeys' => true
+    ]);
+    $allowed = [
+        'add_comments' => CWebUser::checkAccess(CRoleHelper::ACTIONS_ADD_PROBLEM_COMMENTS),
+        'change_severity' => CWebUser::checkAccess(CRoleHelper::ACTIONS_CHANGE_SEVERITY),
+        'acknowledge' => CWebUser::checkAccess(CRoleHelper::ACTIONS_ACKNOWLEDGE_PROBLEMS),
+        'suppress_problems' => CWebUser::checkAccess(CRoleHelper::ACTIONS_SUPPRESS_PROBLEMS),
+        'close' => CWebUser::checkAccess(CRoleHelper::ACTIONS_CLOSE_PROBLEMS),
+        'rank_change' => CWebUser::checkAccess(CRoleHelper::ACTIONS_CHANGE_PROBLEM_RANKING)
+    ];
+    $rows = [];
+    foreach ($events as $event) {
+        $resolved = (string) $event['r_eventid'] !== '0';
+        $closing = !$resolved && hasEventCloseAction($event['acknowledges']);
+        $acknowledged = (int) $event['acknowledged'] === EVENT_ACKNOWLEDGED;
+        $status = new CSpan(getEventStatusString($closing, $event));
+        if (isEventUpdating($closing, $event)) $status->addClass('js-blink');
+        addTriggerValueStyle($status, $resolved || $closing ? TRIGGER_VALUE_FALSE : TRIGGER_VALUE_TRUE,
+            $resolved ? $event['r_clock'] : ($closing ? time() : $event['clock']), $acknowledged);
+        $can_close = $allowed['close'] && !$resolved && !$closing
+            && (int) ($triggers[$event['objectid']]['manual_close'] ?? 0) === ZBX_TRIGGER_MANUAL_CLOSE_ALLOWED;
+        $can_update = $allowed['add_comments'] || $allowed['change_severity'] || $allowed['acknowledge']
+            || $allowed['suppress_problems'] || $allowed['rank_change'] || $can_close;
+        $update = $can_update ? (new CLink(_('Update')))->addClass(ZBX_STYLE_LINK_ALT)
+            ->setAttribute('data-eventid', $event['eventid'])
+            ->onClick('acknowledgePopUp({eventids: [this.dataset.eventid]}, this);') : new CSpan(_('Update'));
+        $event_url = 'tr_events.php?triggerid='.$event['objectid'].'&eventid='.$event['eventid'];
+        $rows[] = (new CRow([
+            (new CLink(zbx_date2str(DATE_TIME_FORMAT_SECONDS, $event['clock']), $event_url))->addClass('action'),
+            $resolved ? (new CLink(zbx_date2str(DATE_TIME_FORMAT_SECONDS, $event['r_clock']), $event_url))
+                ->addClass('action') : '',
+            $status, zbx_date2age($event['clock']),
+            $resolved ? zbx_date2age($event['clock'], $event['r_clock']) : zbx_date2age($event['clock']),
+            $update, makeEventActionsIcons($event['eventid'], $actions['data'], $users, $acknowledged)
+        ]))->setAttribute('data-timeline-event', $event['eventid']);
+    }
+    return $rows;
+}
+
+if ($active_tab === 'timeline_events') {
+    $page = $data['timeline_page'];
+    echo json_encode([
+        'body' => implode('', array_map(static function ($row) { return $row->toString(); },
+            createAnalistTimelineRows($page['events']))),
+        'has_more' => $page['has_more'], 'cursor' => $page['cursor']
+    ]);
+    return;
 }
 
 if ($active_tab === 'history') {
@@ -633,23 +700,27 @@ if ($timeline_comparison_section !== null) {
     $timeline_div->addItem($timeline_comparison_section);
 }
 
-// Use Zabbix's built-in function to create the event list
-$allowed = [
-    'add_comments' => CWebUser::checkAccess(CRoleHelper::ACTIONS_ADD_PROBLEM_COMMENTS),
-    'change_severity' => CWebUser::checkAccess(CRoleHelper::ACTIONS_CHANGE_SEVERITY),
-    'acknowledge' => CWebUser::checkAccess(CRoleHelper::ACTIONS_ACKNOWLEDGE_PROBLEMS),
-    'suppress_problems' => CWebUser::checkAccess(CRoleHelper::ACTIONS_SUPPRESS_PROBLEMS),
-    'close' => CWebUser::checkAccess(CRoleHelper::ACTIONS_CLOSE_PROBLEMS) &&
-                     isset($trigger['manual_close']) && $trigger['manual_close'] == ZBX_TRIGGER_MANUAL_CLOSE_ALLOWED,
-    'rank_change' => CWebUser::checkAccess(CRoleHelper::ACTIONS_CHANGE_PROBLEM_RANKING)
-];
-
-// Create the event list table using the native function
-$timeline_table = make_small_eventlist($event, $allowed);
+$page = $data['timeline_page'] ?? ['events' => [], 'has_more' => false, 'cursor' => null];
+$timeline_table = (new CTableInfo())->setHeader([
+    _('Time'), _('Recovery time'), _('Status'), _('Age'), _('Duration'), _('Update'), _('Actions')
+])->setAttribute('data-timeline-table', '');
+foreach (createAnalistTimelineRows($page['events']) as $row) $timeline_table->addRow($row);
+$more = (new CButton(null, _('More')))->addClass('btn-alt')->setAttribute('data-timeline-more', '')
+    ->setAttribute('data-before-eventid', $page['cursor']['eventid'] ?? '')
+    ->setAttribute('data-before-clock', $page['cursor']['clock'] ?? '')
+    ->setAttribute('aria-label', _('Load 20 more events'));
+if (!$page['has_more']) $more->setAttribute('hidden', 'hidden');
 
 // Add header
 $timeline_div->addItem(new CTag('h4', false, _('Recent Events')));
-$timeline_div->addItem($timeline_table);
+$timeline_div->addItem((new CDiv([
+    $timeline_table,
+    (new CDiv([
+        (new CSpan())->setAttribute('data-timeline-message', '')->setAttribute('role', 'status')
+            ->setAttribute('aria-live', 'polite'),
+        $more
+    ]))->addClass('analist-timeline-more')
+]))->setAttribute('data-timeline-events', ''));
 }
 $panels['timeline'] = $timeline_div;
 
@@ -1044,6 +1115,7 @@ foreach ($tab_labels as $key => $label) {
 }
 $popup_config = [
     'rootId' => $popup_id,
+    'initialTab' => $data['initial_tab'] ?? 'overview',
     'problemActions' => $problem_actions,
     'slaLabels' => [
         'none' => _('No accessible SLA configured'), 'unknown' => _('SLA information unavailable'),
@@ -1095,6 +1167,7 @@ $popup_config = [
     'refreshLabel' => _('Refresh'),
     'addCommentLabel' => _('Add comment'),
     'noMoreHistoryLabel' => _('No more values'),
+    'noMoreEventsLabel' => _('No more events'),
     'expandLabel' => _('Expand'), 'collapseLabel' => _('Collapse')
 ];
 $output = [

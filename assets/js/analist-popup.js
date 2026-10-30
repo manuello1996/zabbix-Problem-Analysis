@@ -709,6 +709,7 @@
             this.historyRequests = new Map();
             this.graphOptions = {};
             this.graphRequest = null;
+            this.timelineRequest = null;
             root.addEventListener('click', event => this.onClick(event), {signal: this.lifecycle.signal});
             root.addEventListener('keydown', event => this.onKeyDown(event), {signal: this.lifecycle.signal});
             root.addEventListener('input', event => {
@@ -768,7 +769,7 @@
             }
             this.dialogue?.addEventListener('dialogue.close', () => this.destroy(),
                 {once: true, signal: this.lifecycle.signal});
-            this.activateTab('overview');
+            this.activateTab(config.initialTab === 'timeline' ? 'timeline' : 'overview');
             this.trackPendingRecovery();
         }
 
@@ -817,7 +818,7 @@
         }
 
         onClick(event) {
-            const button = event.target.closest('[data-tab-target], [data-retry-tab], [data-service-action], [data-problem-action], [data-history-more], .mnz-pattern-toggle');
+            const button = event.target.closest('[data-tab-target], [data-retry-tab], [data-service-action], [data-problem-action], [data-history-more], [data-timeline-more], .mnz-pattern-toggle');
             if (!button || !this.root.contains(button)) return;
             if (button.dataset.tabTarget) {
                 event.preventDefault();
@@ -831,6 +832,9 @@
             } else if (button.hasAttribute('data-history-more')) {
                 event.preventDefault();
                 this.loadMoreHistory(button);
+            } else if (button.hasAttribute('data-timeline-more')) {
+                event.preventDefault();
+                this.loadMoreEvents(button);
             } else if (button.dataset.problemAction) {
                 event.preventDefault();
                 this.updateProblem(button.dataset.problemAction);
@@ -895,6 +899,7 @@
 
         invalidateTabs() {
             this.dataVersion++;
+            this.timelineRequest = null;
             if (this.activeTab !== 'graphs') this.graphOptions = {};
             this.graphRequest = null;
             if (this.recoveryTimer !== null) window.clearTimeout(this.recoveryTimer);
@@ -1058,6 +1063,47 @@
                 }
             });
             this.graphRequest = request;
+            return request;
+        }
+
+        loadMoreEvents(button) {
+            const section = button.closest('[data-timeline-events]');
+            if (this.closed || !section || !this.root.contains(section)) return Promise.resolve();
+            if (this.timelineRequest) return this.timelineRequest;
+            const rows = section.querySelector('[data-timeline-table] tbody');
+            const message = section.querySelector('[data-timeline-message]');
+            const version = this.dataVersion;
+            button.disabled = true;
+            section.setAttribute('aria-busy', 'true');
+            message.textContent = '';
+            const request = this.fetchJson('problemanalist.tab.get', {
+                eventid: this.config.eventData.eventid, tab: 'timeline_events',
+                before_eventid: button.dataset.beforeEventid, before_clock: button.dataset.beforeClock
+            }).then(result => {
+                if (this.closed || version !== this.dataVersion || !this.root.contains(section)) return;
+                if (typeof result.body !== 'string' || typeof result.has_more !== 'boolean'
+                        || (result.has_more && !result.cursor)) throw new Error('Invalid recent events response');
+                rows.insertAdjacentHTML('beforeend', result.body);
+                if (result.cursor) {
+                    button.dataset.beforeEventid = result.cursor.eventid;
+                    button.dataset.beforeClock = result.cursor.clock;
+                }
+                button.hidden = !result.has_more;
+                if (!result.has_more) message.textContent = this.config.noMoreEventsLabel;
+                this.scheduleLayout();
+            }).catch(error => {
+                if (!this.closed && version === this.dataVersion && this.root.contains(section) && error.name !== 'AbortError') {
+                    message.textContent = error.message;
+                }
+            }).finally(() => {
+                if (this.timelineRequest === request) this.timelineRequest = null;
+                if (!this.closed && version === this.dataVersion && this.root.contains(section)) {
+                    button.disabled = false;
+                    section.removeAttribute('aria-busy');
+                    this.scheduleLayout();
+                }
+            });
+            this.timelineRequest = request;
             return request;
         }
 
@@ -1251,6 +1297,7 @@
             this.historyRequests.clear();
             this.graphRequest = null;
             this.graphOptions = {};
+            this.timelineRequest = null;
             this.patternRenderer = null;
             AnalistProblemPopup.instances.delete(this);
         }

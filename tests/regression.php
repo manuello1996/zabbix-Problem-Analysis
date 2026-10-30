@@ -3,10 +3,16 @@ if (PHP_SAPI !== 'cli') { http_response_code(404); exit; }
 /** Run with: ZABBIX_UI_ROOT=/usr/share/zabbix php tests/regression.php */
 $ui_root = getenv('ZABBIX_UI_ROOT') ?: dirname(__DIR__, 3);
 require $ui_root.'/include/defines.inc.php';
+require $ui_root.'/include/gettextwrapper.inc.php';
+require $ui_root.'/include/classes/validators/CApiInputValidator.php';
 require $ui_root.'/include/classes/helpers/CArrayHelper.php';
 require $ui_root.'/include/classes/helpers/CRoleHelper.php';
 require $ui_root.'/include/actions.inc.php';
 require $ui_root.'/include/hosts.inc.php';
+require $ui_root.'/include/classes/core/CAutoloader.php';
+$autoload = new CAutoloader();
+$autoload->addNamespace('', [$ui_root.'/include/classes/parsers']);
+$autoload->register();
 
 set_error_handler(static function ($severity, $message, $file, $line) {
     throw new ErrorException($message, 0, $severity, $file, $line);
@@ -42,6 +48,36 @@ class ApiFixture {
         API::$calls[] = [$this->kind, $options];
         switch ($this->kind) {
             case 'event':
+                if (API::$timeline_events !== null && isset($options['limit'], $options['objectids'])) {
+                    $eventid_till = $options['eventid_till'];
+                    $error = '';
+                    check(CApiInputValidator::validate(['type' => API_ID], $eventid_till, '/eventid_till', $error),
+                        'Timeline paging must send a valid native API event ID: '.$error);
+                    if (API::$timeline_events === false) return false;
+                    $events = array_values(array_filter(API::$timeline_events, static function ($event) use ($options) {
+                        return (string) $event['objectid'] === (string) $options['objectids']
+                            && (int) $event['source'] === $options['source'] && (int) $event['object'] === $options['object']
+                            && (int) $event['value'] === $options['value']
+                            && bccomp((string) $event['eventid'], (string) $options['eventid_till']) <= 0
+                            && (!isset($options['time_from']) || $event['clock'] >= $options['time_from'])
+                            && (!isset($options['time_till']) || $event['clock'] <= $options['time_till']);
+                    }));
+                    usort($events, static function ($left, $right) {
+                        return ($right['clock'] <=> $left['clock']) ?: bccomp($right['eventid'], $left['eventid']);
+                    });
+                    return array_slice($events, 0, $options['limit']);
+                }
+                if (is_array(API::$timeline_events) && isset($options['eventids'])) {
+                    return array_values(array_filter(API::$timeline_events, static function ($event) use ($options) {
+                        return in_array((string) $event['eventid'], array_map('strval', (array) $options['eventids']), true);
+                    }));
+                }
+                if (!empty($options['countOutput'])) return API::$recurrence_counts;
+                if (isset($options['eventids']) && API::$recurrence_events !== null) {
+                    return array_values(array_filter(API::$recurrence_events, static function ($event) use ($options) {
+                        return in_array($event['eventid'], (array) $options['eventids']);
+                    }));
+                }
                 if (!isset($options['eventids'])) return API::$history;
                 if (in_array('2', array_map('strval', (array) $options['eventids']), true)) {
                     return [['eventid' => '2', 'clock' => 220]];
@@ -100,6 +136,9 @@ class ApiFixture {
 }
 class API {
     public static $event = [];
+    public static $timeline_events = null;
+    public static $recurrence_events = null;
+    public static $recurrence_counts = [];
     public static $trigger = null;
     public static $hosts = [];
     public static $editable = true;
@@ -240,6 +279,44 @@ check(!json_decode($controller->response->getData()['main_block'], true)['succes
 $controller = new ProblemControllerFixture(['eventid' => '999', 'triggerid' => '99', 'hostid' => '88']);
 $controller->run();
 check(isset(json_decode($controller->response->getData()['main_block'], true)['error']), 'Missing events must not be fabricated');
+
+// Recurrences count only readable problem events and group the count by the server-resolved trigger.
+$recurrence_base = ['source' => EVENT_SOURCE_TRIGGERS, 'object' => EVENT_OBJECT_TRIGGER, 'value' => TRIGGER_VALUE_TRUE];
+API::$recurrence_events = [
+    $recurrence_base + ['eventid' => '1', 'objectid' => '7'],
+    $recurrence_base + ['eventid' => '3', 'objectid' => '7'],
+    $recurrence_base + ['eventid' => '4', 'objectid' => '8'],
+    ['eventid' => '2', 'objectid' => '7', 'source' => 0, 'object' => 0, 'value' => 0]
+];
+API::$recurrence_counts = [['objectid' => '7', 'rowscount' => '12']];
+API::$calls = [];
+$recurrence_request = ['eventid' => '1', 'tab' => 'recurrences', 'triggerid' => '999',
+    'recurrence_eventids' => ['1', '3', '4', '2', '999']];
+$recurrences = new ProblemControllerFixture($recurrence_request);
+$recurrences->run();
+$counts = json_decode($recurrences->response->getData()['main_block'], true);
+check($counts['counts'] === ['1' => '12', '3' => '12', '4' => '0'],
+    'Rows for the same trigger share a count; inaccessible or recovery events do not get fabricated counts');
+check(count(API::$calls) === 2 && API::$calls[1][1]['objectids'] === ['7', '8'],
+    'Recurrences use one grouped count query without trigger, host or history enrichment');
+$count_query = API::$calls[1][1];
+check($count_query['countOutput'] && $count_query['groupBy'] === ['objectid']
+    && $count_query['value'] === TRIGGER_VALUE_TRUE && !isset($count_query['limit']),
+    'Count all matching problem occurrences rather than recovery events or a limited page');
+check($counts['time_till'] - $counts['time_from'] > 150 * SEC_PER_DAY
+    && $counts['time_till'] - $counts['time_from'] < 187 * SEC_PER_DAY,
+    'Recurrences use a rolling six-calendar-month window ending now');
+API::$recurrence_counts = false;
+$recurrences->run();
+check(isset(json_decode($recurrences->response->getData()['main_block'], true)['error']),
+    'A count-query failure is an error rather than a zero');
+API::$recurrence_events = [];
+API::$calls = [];
+$recurrences->run();
+check(isset(json_decode($recurrences->response->getData()['main_block'], true)['error']) && count(API::$calls) === 1,
+    'Inaccessible events never trigger an unscoped count query');
+API::$recurrence_events = null;
+API::$recurrence_counts = [];
 
 $ack = ['acknowledgeid' => '3', 'clock' => 110, 'userid' => '4', 'message' => 'Investigating',
     'action' => ZBX_PROBLEM_UPDATE_MESSAGE | ZBX_PROBLEM_UPDATE_ACKNOWLEDGE | ZBX_PROBLEM_UPDATE_SEVERITY,
@@ -399,6 +476,61 @@ check(isset(json_decode($more_history(100, 500)['main_block'], true)['error']), 
 API::$items[0]['value_type'] = ITEM_VALUE_TYPE_UINT64;
 API::$item_history = false;
 check(isset(json_decode($more_history(100, 500)['main_block'], true)['error']), 'History lookup failures remain retryable errors');
+
+// Event paging is stable across same-second rows, out-of-order timestamps and large IDs.
+$timeline_parent = ['eventid' => '9007199254741999', 'objectid' => '7', 'source' => EVENT_SOURCE_TRIGGERS,
+    'object' => EVENT_OBJECT_TRIGGER, 'value' => TRIGGER_VALUE_TRUE, 'clock' => 100,
+    'acknowledged' => 0, 'severity' => 2, 'r_eventid' => '0', 'cause_eventid' => '0', 'acknowledges' => []];
+API::$timeline_events = [$timeline_parent];
+for ($number = 0; $number < 39; $number++) {
+    API::$timeline_events[] = array_replace($timeline_parent, ['eventid' => bcsub($timeline_parent['eventid'], (string) (100 + $number), 0)]);
+}
+foreach ([1, 300, 301, 302] as $offset) {
+    API::$timeline_events[] = array_replace($timeline_parent,
+        ['eventid' => bcsub($timeline_parent['eventid'], (string) $offset, 0), 'clock' => 90]);
+}
+$foreign_id = bcsub($timeline_parent['eventid'], '600', 0);
+$future_id = bcadd($timeline_parent['eventid'], '1', 0);
+API::$timeline_events[] = array_replace($timeline_parent, ['eventid' => $foreign_id, 'objectid' => '8']);
+API::$timeline_events[] = array_replace($timeline_parent, ['eventid' => $future_id]);
+$event_page_method = new ReflectionMethod(Modules\AnalistProblem\Actions\CControllerAnalistProblemPopup::class, 'getTimelinePage');
+$event_page_method->setAccessible(true);
+$event_page = static function (?array $cursor = null) use ($timeline_parent, $event_page_method) {
+    $input = ['eventid' => $timeline_parent['eventid'], 'tab' => $cursor ? 'timeline_events' : 'timeline'];
+    if ($cursor) $input += ['before_eventid' => $cursor['eventid'], 'before_clock' => $cursor['clock']];
+    return $event_page_method->invoke(new ProblemControllerFixture($input), $timeline_parent);
+};
+API::$calls = [];
+$first_page = $event_page();
+check(count($first_page['events']) === 20 && $first_page['has_more'], 'Timeline starts with twenty events and a lookahead');
+check(API::$calls[0][1]['limit'] === 21 && in_array('message', API::$calls[0][1]['selectAcknowledges'], true),
+    'Paging retains complete native update data and requests one lookahead event');
+$second_page = $event_page($first_page['cursor']);
+$final_page = $event_page($second_page['cursor']);
+check(count($second_page['events']) === 20 && $second_page['has_more'], 'More appends the next twenty events');
+check(count($final_page['events']) === 4 && !$final_page['has_more'], 'The final partial page exhausts More');
+check($final_page['events'][0]['eventid'] === bcsub($timeline_parent['eventid'], '1', 0),
+    'An older timestamp with a larger event ID must not be skipped');
+$loaded_ids = array_column(array_merge($first_page['events'], $second_page['events'], $final_page['events']), 'eventid');
+check(count(array_unique($loaded_ids)) === 44, 'All events load exactly once across a shared timestamp');
+check($event_page($final_page['cursor'])['events'] === [], 'An exhausted cursor returns an empty page');
+foreach ([['eventid' => $foreign_id, 'clock' => 100], ['eventid' => $future_id, 'clock' => 100],
+        ['eventid' => $first_page['cursor']['eventid'], 'clock' => 99]] as $bad_cursor) {
+    try { $event_page($bad_cursor); }
+    catch (RuntimeException $exception) { continue; }
+    throw new RuntimeException('Invalid or unrelated event cursors must be rejected');
+}
+API::$calls = [];
+$more_controller = new ProblemControllerFixture(['eventid' => $timeline_parent['eventid'], 'tab' => 'timeline_events',
+    'before_eventid' => $first_page['cursor']['eventid'], 'before_clock' => $first_page['cursor']['clock']]);
+$more_controller->run();
+check(count($more_controller->response->getData()['timeline_page']['events']) === 20
+    && !array_filter(API::$calls, static function ($call) { return $call[0] !== 'event'; }),
+    'More skips monthly comparisons and unrelated tab data');
+API::$timeline_events = false;
+try { $event_page(); throw new Exception('A failed history query must not look like exhaustion'); }
+catch (RuntimeException $exception) {}
+API::$timeline_events = null;
 
 // Evaluate the view’s actual calendar preparation without rendering a Zabbix page.
 $view = file_get_contents(dirname(__DIR__).'/views/problemanalist.view.php');

@@ -15,6 +15,12 @@ export async function runRegression(fixture, asset, popupAsset, fragments = {}, 
     vm.runInContext(inline, context);
     assert.equal(config.eventData.hostname, fixture.host.name);
     assert.equal(config.eventData.problem_name, fixture.event.name);
+    if (actionFixtures['timeline-start']) {
+        let timelineConfig;
+        vm.runInNewContext(actionFixtures['timeline-start'].inline,
+            {window: {AnalistProblemPopup: {mount(value) { timelineConfig = value; }}}});
+        assert.equal(timelineConfig.initialTab, 'timeline', 'The native popup response retains the requested initial tab');
+    }
     assert(fixture.response.body.includes('data-problem-status="">Problem</span>'));
     assert(fixture.response.body.includes('>Started</th>') && fixture.response.body.includes('>Event ID</th>'));
     assert(fixture.response.body.includes('>#1</a>'), 'The event reference links to native event details');
@@ -104,6 +110,21 @@ export async function runRegression(fixture, asset, popupAsset, fragments = {}, 
         assert(!actionFixtures['graphs-custom'].response.body.includes('data-graph-custom-range="" hidden="hidden"'));
         assert(!actionFixtures['graphs-custom'].response.body.match(/<button[^>]*data-graph-apply=""[^>]*>/)?.[0].includes('hidden="hidden"'),
             'Custom period renders Apply visible');
+    }
+    if (actionFixtures['timeline-page']) {
+        const body = actionFixtures['timeline-page'].response.body;
+        assert.equal((body.match(/data-timeline-event="/g) || []).length, 20);
+        assert(body.includes('data-timeline-more=""') && body.includes('data-before-eventid="81"'));
+        assert(body.includes('acknowledgePopUp(') && body.includes('tr_events.php?triggerid=7'),
+            'Paged Timeline rows retain native event links and Update actions');
+    }
+    if (actionFixtures['timeline-more-page']) {
+        const rendered = actionFixtures['timeline-more-page'];
+        assert.equal(rendered.inline, '');
+        assert.equal((rendered.response.body.match(/data-timeline-event="/g) || []).length, 20);
+        assert(!rendered.response.body.includes('Monthly Comparison') && !rendered.response.body.includes('<table'),
+            'More returns event rows without rebuilding the comparison or table');
+        assert(rendered.response.has_more && rendered.response.cursor.eventid === '61');
     }
     if (actionFixtures['history-preview']) {
         const body = actionFixtures['history-preview'].response.body;
@@ -548,11 +569,19 @@ export async function runRegression(fixture, asset, popupAsset, fragments = {}, 
     assert.equal(recoveryTimers.size, 0);
 
     // A small table fixture checks column alignment and idempotence independently of a browser.
-    class Element {
-        constructor(tagName) { this.tagName = tagName.toUpperCase(); this.children = []; this.className = ''; this.colSpan = 1; }
+    class Element extends Target {
+        constructor(tagName) {
+            super(); this.tagName = tagName.toUpperCase(); this.children = []; this.className = ''; this.colSpan = 1;
+            this.isConnected = true; this.attributes = {}; this.textContent = '';
+        }
         appendChild(child) { child.parent = this; this.children.push(child); return child; }
+        insertBefore(child, before) {
+            child.parent = this;
+            const index = before ? this.children.indexOf(before) : this.children.length;
+            this.children.splice(index, 0, child); return child;
+        }
         remove() { this.parent.children = this.parent.children.filter(child => child !== this); }
-        addEventListener() {}
+        setAttribute(name, value) { this.attributes[name] = value; }
         querySelector(selector) {
             if (selector.includes('data-menu-popup')) return this.problemData ? {} : null;
             const classes = selector.match(/\.([\w-]+)/g) || [];
@@ -789,6 +818,67 @@ export async function runRegression(fixture, asset, popupAsset, fragments = {}, 
     assert(pending[index].options.signal.aborted && historyPopup.historyRequests.size === 0,
         'Closing cancels item history requests');
 
+    const eventsRoot = popupRoot(); roots.set('timeline-more', eventsRoot);
+    const eventsPopup = Popup.mount({...config, rootId: 'timeline-more'});
+    const initialEventsBody = actionFixtures['timeline-page']?.response.body || '';
+    index = pending.length;
+    const initialEvents = eventsPopup.activateTab('timeline');
+    pending[index].resolve({body: initialEventsBody}); await initialEvents;
+    const eventsSection = new Panel(''); eventsSection.popupRoot = eventsRoot;
+    const initialRows = (initialEventsBody.match(/<tr[^>]*data-timeline-event="\d+"[^>]*>.*?<\/tr>/gs) || []).join('');
+    const eventRows = {innerHTML: initialRows, insertAdjacentHTML(position, html) { this.innerHTML += html; }};
+    const eventsMessage = {textContent: ''};
+    eventsSection.querySelector = selector => selector === '[data-timeline-table] tbody' ? eventRows : eventsMessage;
+    const eventsMore = new Panel(''); eventsMore.popupRoot = eventsRoot;
+    eventsMore.dataset = {beforeEventid: '81', beforeClock: '100'};
+    eventsMore.hasAttribute = name => name === 'data-timeline-more';
+    eventsMore.closest = selector => selector === '[data-timeline-events]' ? eventsSection : eventsMore;
+    index = pending.length;
+    eventsRoot.dispatch('click', {target: eventsMore, preventDefault() {}});
+    let moreEvents = eventsPopup.timelineRequest;
+    assert(moreEvents && eventsPopup.loadMoreEvents(eventsMore) === moreEvents,
+        'The delegated More button deduplicates pending event loads');
+    assert.equal(pending[index].options.body.get('tab'), 'timeline_events');
+    assert.equal(pending[index].options.body.get('before_eventid'), '81');
+    assert.equal(pending[index].options.body.get('before_clock'), '100');
+    assert(eventsMore.disabled && !eventsRoot.cancelButton.disabled);
+    await eventsPopup.activateTab('overview');
+    const moreEventsBody = actionFixtures['timeline-more-page']?.response.body || '<tr data-timeline-event="80"></tr>';
+    pending[index].resolve({body: moreEventsBody, has_more: true, cursor: {eventid: '61', clock: 80}}); await moreEvents;
+    assert.equal(eventsPopup.activeTab, 'overview', 'Late event pages preserve the selected tab');
+    assert.equal(eventRows.innerHTML, initialRows + moreEventsBody, 'More appends rows without replacing previous events');
+    if (actionFixtures['timeline-page']) assert.equal((eventRows.innerHTML.match(/data-timeline-event="/g) || []).length, 40);
+    assert.equal(eventsMore.dataset.beforeEventid, '61');
+    assert(!eventsMore.disabled && !eventsMore.hidden);
+    await eventsPopup.activateTab('timeline');
+    index = pending.length;
+    moreEvents = eventsPopup.loadMoreEvents(eventsMore);
+    pending[index].resolve({error: {messages: ['Unable to load recent events']}}); await moreEvents;
+    assert.equal(eventsMessage.textContent, 'Unable to load recent events');
+    assert(!eventsMore.disabled && eventRows.innerHTML === initialRows + moreEventsBody,
+        'A failed event page retains loaded rows and a retryable More button');
+    index = pending.length;
+    moreEvents = eventsPopup.loadMoreEvents(eventsMore);
+    const finalEventsBody = actionFixtures['timeline-final-page']?.response.body || '<tr data-timeline-event="60"></tr>';
+    pending[index].resolve({body: finalEventsBody, has_more: false, cursor: {eventid: '58', clock: 70}}); await moreEvents;
+    assert(eventsMore.hidden && eventsMessage.textContent === config.noMoreEventsLabel,
+        'The final partial page hides More and announces exhaustion');
+    index = pending.length;
+    moreEvents = eventsPopup.loadMoreEvents(eventsMore);
+    reloading = eventsPopup.refreshTab(); await moreEvents;
+    assert(pending[index].options.signal.aborted && eventsPopup.timelineRequest === null,
+        'Refresh aborts event pagination and resets its request state');
+    pending[index + 1].resolve({body: initialEventsBody}); await reloading;
+    eventsSection.popupRoot = null;
+    index = pending.length;
+    await eventsPopup.loadMoreEvents(eventsMore);
+    assert.equal(pending.length, index, 'Detached Timeline controls cannot load another page');
+    eventsSection.popupRoot = eventsRoot;
+    moreEvents = eventsPopup.loadMoreEvents(eventsMore);
+    eventsRoot.dialogue.dispatch('dialogue.close'); await moreEvents;
+    assert(pending[index].options.signal.aborted && eventsPopup.timelineRequest === null,
+        'Close cancels pending event pages');
+
     const graphRoot = popupRoot(); roots.set('graph-controls', graphRoot);
     const graphPopup = Popup.mount({...config, rootId: 'graph-controls'});
     index = pending.length;
@@ -909,6 +999,15 @@ export async function runRegression(fixture, asset, popupAsset, fragments = {}, 
     assert.equal(graphRoot.handlers.get('submit').size, 0);
     assert.equal(graphRoot.handlers.get('change').size, 0);
 
+    const timelineRoot = popupRoot(); roots.set('initial-timeline', timelineRoot);
+    index = pending.length;
+    const initialTimeline = Popup.mount({...config, rootId: 'initial-timeline', initialTab: 'timeline'});
+    assert.equal(initialTimeline.activeTab, 'timeline', 'Recurrence links open directly on Timeline');
+    assert.equal(pending.length, index + 1);
+    assert.equal(pending[index].options.body.get('tab'), 'timeline');
+    pending[index].resolve({body: 'Initial timeline'}); await initialTimeline.tabs.get('timeline').promise;
+    initialTimeline.destroy();
+
     function tableFixture() {
         const header = new Element('tr');
         header.appendChild(new Element('th')); header.appendChild(new Element('th'));
@@ -916,13 +1015,29 @@ export async function runRegression(fixture, asset, popupAsset, fragments = {}, 
         problem.problemData = {eventid: '1', triggerid: '7', hostid: '11'};
         problem.appendChild(new Element('td')); problem.appendChild(new Element('td'));
         const separator = new Element('tr'); const span = new Element('td'); span.colSpan = 2; separator.appendChild(span);
-        const table = {header, problem, separator,
-            querySelector(selector) { return selector === 'tbody' ? {rows: [problem, separator]} : header; }};
+        const table = {header, problem, separator, bodyRows: [problem, separator],
+            querySelector(selector) { return selector === 'tbody' ? {rows: this.bodyRows} : header; }};
         return table;
     }
     const table = tableFixture();
     const selectors = [];
-    const dom = {window: {}, document: {
+    const recurrenceRequests = [];
+    const openedPopups = [];
+    let viewport;
+    const dom = {window: {}, AbortController, URLSearchParams,
+        IntersectionObserver: class {
+            constructor(callback) { this.callback = callback; this.targets = new Set(); viewport = this; }
+            observe(target) { this.targets.add(target); }
+            unobserve(target) { this.targets.delete(target); }
+            disconnect() { this.targets.clear(); }
+        },
+        PopUp(...args) { openedPopups.push(args); },
+        fetch(url, options) {
+            return new Promise((resolve, reject) => {
+                recurrenceRequests.push({url, options, resolve: result => resolve({ok: true, json: async () => result})});
+                options.signal.addEventListener('abort', () => reject(Object.assign(new Error('Cancelled'), {name: 'AbortError'})));
+            });
+        }, document: {
         addEventListener(name, callback) { callback(); },
         createElement(name) { return new Element(name); },
         querySelectorAll(selector) { selectors.push(selector); return selector === '.dashboard-widget-problems table.list-table' ? [table] : []; }
@@ -930,6 +1045,8 @@ export async function runRegression(fixture, asset, popupAsset, fragments = {}, 
     vm.createContext(dom);
     vm.runInContext(asset.replace('new AnalistProblem();', 'window.TestAnalistProblem = AnalistProblem;'), dom);
     const controller = Object.create(dom.window.TestAnalistProblem.prototype);
+    controller.events = new AbortController();
+    controller.initRecurrences();
     const scheduled = new Map();
     let timerId = 0;
     dom.setTimeout = callback => { scheduled.set(++timerId, callback); return timerId; };
@@ -940,12 +1057,15 @@ export async function runRegression(fixture, asset, popupAsset, fragments = {}, 
     controller.observer = {disconnect() { disconnected = true; }};
     controller.suspend();
     assert(disconnected && scheduled.size === 0, 'Suspending removes the observer and timer');
+    controller.suspended = false;
     controller.extractProblemDataFromMenuPopup = row => row.problemData || null;
     controller.addLTSButtonToDashboardWidgets();
     controller.addLTSButtonToDashboardWidgets();
-    assert.equal(table.header.cells.length, 3, 'Repeated decoration must not duplicate headers');
-    assert.equal(table.problem.cells.length, 3, 'Repeated decoration must not duplicate buttons');
-    assert.equal(table.separator.cells[0].colSpan, 3, 'Separators must span the added column');
+    assert.equal(table.header.cells.length, 4, 'Repeated decoration must not duplicate headers');
+    assert.equal(table.header.cells[2].className, 'analist-recurrences-header');
+    assert.equal(table.header.cells[3].textContent, 'Details');
+    assert.equal(table.problem.cells.length, 4, 'Repeated decoration must not duplicate cells');
+    assert.equal(table.separator.cells[0].colSpan, 4, 'Separators must span both added columns');
     assert(selectors.every(selector => selector === '.dashboard-widget-problems table.list-table'), 'Only problem widgets may be selected');
     const unrelated = tableFixture(); unrelated.problem.problemData = null;
     controller.decorateProblemTable(unrelated);
@@ -954,6 +1074,82 @@ export async function runRegression(fixture, asset, popupAsset, fragments = {}, 
     empty.querySelector = selector => selector === 'tbody' ? {rows: [empty.separator]} : empty.header;
     controller.decorateProblemTable(empty, true);
     assert.equal(empty.header.cells.length, 2, 'Empty widgets must not gain a stray header');
+
+    function extraProblem(eventid, triggerid) {
+        const row = new Element('tr');
+        row.problemData = {eventid, triggerid, hostid: '11'};
+        row.appendChild(new Element('td')); row.appendChild(new Element('td'));
+        table.bodyRows.push(row); return row;
+    }
+    const repeated = extraProblem('3', '7');
+    const another = extraProblem('4', '8');
+    const offscreen = extraProblem('5', '9');
+    controller.decorateProblemTable(table, true);
+    assert.equal(recurrenceRequests.length, 0, 'Decorating the table must not fetch counts before cells become visible');
+    const recurrenceCell = row => row.querySelector('.analist-recurrences-cell');
+    assert(viewport.targets.has(recurrenceCell(offscreen)));
+    viewport.callback([table.problem, repeated, another].map(row => ({target: recurrenceCell(row), isIntersecting: true})));
+    assert.equal(scheduled.size, 1, 'Visible rows share a single deferred count batch');
+    const runBatchTimer = () => {
+        const callbacks = [...scheduled.values()]; scheduled.clear(); callbacks.forEach(callback => callback());
+    };
+    const finishBatch = async () => {
+        for (let attempt = 0; attempt < 20 && controller.recurrenceRequest; attempt++) await Promise.resolve();
+        assert.equal(controller.recurrenceRequest, null);
+    };
+    runBatchTimer();
+    assert.equal(recurrenceRequests.length, 1);
+    assert.equal(recurrenceRequests[0].options.body.get('tab'), 'recurrences');
+    assert.deepEqual([...recurrenceRequests[0].options.body.getAll('recurrence_eventids[]')], ['1', '4'],
+        'Rows sharing a trigger use one representative event in the batch');
+    recurrenceRequests[0].resolve({counts: {'1': '12', '4': '0'}}); await finishBatch();
+    assert.equal(recurrenceCell(table.problem).analistRecurrences.button.textContent, '12');
+    assert.equal(recurrenceCell(repeated).analistRecurrences.button.textContent, '12');
+    assert.equal(recurrenceCell(another).analistRecurrences.button.textContent, '0', 'Zero is a valid count');
+    assert.equal(recurrenceCell(offscreen).analistRecurrences.button.textContent, '…');
+    const click = {preventDefault() {}, stopPropagation() {}};
+    recurrenceCell(repeated).analistRecurrences.button.dispatch('click', click);
+    assert.equal(openedPopups[0][0], 'problemanalist.view');
+    const recurrencePopupParams = new URLSearchParams(openedPopups[0][1]);
+    assert.equal(recurrencePopupParams.get('eventid'), '3', 'Each count opens its own row event');
+    assert.equal(recurrencePopupParams.get('initial_tab'), 'timeline');
+    table.problem.querySelector('.js-lts-button-widget').dispatch('click', click);
+    assert.equal(new URLSearchParams(openedPopups[1][1]).get('initial_tab'), null,
+        'The existing Details button keeps its default tab');
+    controller.decorateProblemTable(table, true);
+    assert.equal(recurrenceRequests.length, 1, 'Fresh counts survive repeated decoration');
+    viewport.callback([{target: recurrenceCell(offscreen), isIntersecting: true}]); runBatchTimer();
+    recurrenceRequests[1].resolve({error: {messages: ['Unable to count events']}}); await finishBatch();
+    const retry = recurrenceCell(offscreen).analistRecurrences.button;
+    assert.equal(retry.textContent, 'Retry'); assert(!retry.disabled);
+    retry.dispatch('click', click); runBatchTimer();
+    recurrenceRequests[2].resolve({counts: {'5': '2'}}); await finishBatch();
+    assert.equal(retry.textContent, '2', 'Failed lazy loads remain retryable');
+    const batchRows = Array.from({length: 41}, (_, number) => extraProblem(String(100 + number), String(100 + number)));
+    controller.decorateProblemTable(table, true);
+    const batchStart = recurrenceRequests.length;
+    viewport.callback(batchRows.map(row => ({target: recurrenceCell(row), isIntersecting: true}))); runBatchTimer();
+    const firstBatchIds = recurrenceRequests[batchStart].options.body.getAll('recurrence_eventids[]');
+    assert.equal(firstBatchIds.length, 40, 'Large visible tables use bounded count batches');
+    recurrenceRequests[batchStart].resolve({counts: Object.fromEntries(firstBatchIds.map(id => [id, '1']))});
+    for (let attempt = 0; attempt < 20 && recurrenceRequests.length === batchStart + 1; attempt++) await Promise.resolve();
+    assert.equal(recurrenceRequests.length, batchStart + 2, 'Remaining visible rows load after the active batch finishes');
+    const secondBatchIds = recurrenceRequests[batchStart + 1].options.body.getAll('recurrence_eventids[]');
+    assert.equal(secondBatchIds.length, 1);
+    recurrenceRequests[batchStart + 1].resolve({counts: {[secondBatchIds[0]]: '2'}}); await finishBatch();
+    assert.equal(recurrenceCell(batchRows.at(-1)).analistRecurrences.button.textContent, '2');
+    const detached = extraProblem('6', '10'); controller.decorateProblemTable(table, true);
+    const detachedCell = recurrenceCell(detached); detachedCell.isConnected = false;
+    controller.pruneRecurrences();
+    viewport.callback([{target: detachedCell, isIntersecting: true}]);
+    assert.equal(scheduled.size, 0, 'Late viewport notifications must not fetch detached rows');
+    assert(!controller.recurrenceGroups.has('trigger:10'));
+    const waiting = extraProblem('7', '11'); controller.decorateProblemTable(table, true);
+    viewport.callback([{target: recurrenceCell(waiting), isIntersecting: true}]); runBatchTimer();
+    const lastCountRequest = recurrenceRequests.at(-1);
+    controller.suspend(); await Promise.resolve(); await Promise.resolve();
+    assert(lastCountRequest.options.signal.aborted && viewport.targets.size === 0,
+        'Page suspension cancels pending counts and disconnects the viewport observer');
     console.log('JavaScript regression checks passed.');
 }
 
@@ -969,7 +1165,7 @@ if (typeof process !== 'undefined' && process.argv[1] && path.resolve(process.ar
     }
     const fragments = Object.fromEntries(['host', 'timeline', 'patterns', 'graphs', 'update'].map(tab => [tab, render(tab)]));
     const actionFixtures = Object.fromEntries(['readonly', 'permitted', 'acknowledged', 'ack-only', 'fragment', 'recovered', 'closing',
-        'details', 'recovery-unavailable']
+        'details', 'recovery-unavailable', 'timeline-start']
         .map(scenario => [scenario, render('overview', scenario)]));
     for (const scenario of ['permitted', 'readonly', 'comment-only']) {
         actionFixtures['update-' + scenario] = render('update', scenario);
@@ -979,6 +1175,9 @@ if (typeof process !== 'undefined' && process.argv[1] && path.resolve(process.ar
     for (const scenario of ['graphs-many', 'graphs-combined', 'graphs-empty', 'graphs-custom', 'graphs-before']) {
         actionFixtures[scenario] = render('graphs', scenario);
     }
+    actionFixtures['timeline-page'] = render('timeline', 'timeline-page');
+    actionFixtures['timeline-more-page'] = render('timeline_events', 'timeline-more-page');
+    actionFixtures['timeline-final-page'] = render('timeline_events', 'timeline-final-page');
     await runRegression(render('overview'), fs.readFileSync(path.join(root, 'assets/js/analist-problem.js'), 'utf8'),
         fs.readFileSync(path.join(root, 'assets/js/analist-popup.js'), 'utf8'), fragments, actionFixtures);
 }

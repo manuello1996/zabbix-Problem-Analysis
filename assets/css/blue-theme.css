@@ -772,6 +772,16 @@
 }
 
 /* Estilos para a nova coluna LTS */
+.analist-recurrences-header,
+.analist-recurrences-cell {
+    width: 100px;
+    text-align: center !important;
+    white-space: nowrap;
+    vertical-align: middle !important;
+}
+.analist-recurrences-cell {
+    padding: 4px !important;
+}
 .lts-header {
     width: 60px !important;
     text-align: center !important;
@@ -1192,8 +1202,16 @@ td:has(.js-lts-button-widget) {
     white-space: normal;
 }
 .analist-popup-comment[hidden],
-.event-details-popup [data-history-more][hidden] {
+.event-details-popup [data-history-more][hidden],
+.event-details-popup [data-timeline-more][hidden] {
     display: none;
+}
+.event-details-popup .analist-timeline-more {
+    display: flex;
+    align-items: center;
+    justify-content: flex-end;
+    gap: 8px;
+    margin-top: 12px;
 }
 .event-details-popup .analist-graph-toolbar,
 .event-details-popup .analist-graph-custom-range:not([hidden]),

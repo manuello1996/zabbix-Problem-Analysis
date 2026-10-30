@@ -31,7 +31,9 @@ class CControllerAnalistProblemPopup extends CController {
     protected function checkInput(): bool {
         $fields = [
             'eventid'       => 'required|id',
-            'tab'           => 'string|in overview,host,timeline,patterns,graphs,update,history',
+            'tab'           => 'string|in overview,host,timeline,timeline_events,patterns,graphs,update,history,recurrences',
+            'initial_tab'   => 'in overview,timeline',
+            'recurrence_eventids' => 'array_id',
             'triggerid'     => 'id',
             'hostid'        => 'id',
             'hostname'      => 'string',
@@ -42,6 +44,7 @@ class CControllerAnalistProblemPopup extends CController {
             'itemid'        => 'id',
             'before_clock'  => 'int32|ge 0',
             'before_ns'     => 'int32|ge 0|le 999999999',
+            'before_eventid' => 'id',
             'graph_period'  => 'in around,before,duration,day,custom',
             'graph_layout'  => 'in items,combined',
             'graph_from'    => 'range_time',
@@ -49,11 +52,23 @@ class CControllerAnalistProblemPopup extends CController {
         ];
 
         $ret = $this->validateInput($fields);
+        if ($ret && $this->getInput('tab', 'overview') === 'recurrences') {
+            $eventids = $this->getInput('recurrence_eventids', [$this->getInput('eventid')]);
+            if (!$eventids || count($eventids) > 40) {
+                error(_('Select between 1 and 40 problem events.'));
+                $ret = false;
+            }
+        }
         if ($ret && $this->getInput('tab', 'overview') === 'history') {
             $ret = $this->validateInput(array_replace($fields, [
                 'itemid' => 'required|id',
                 'before_clock' => 'required|int32|ge 0',
                 'before_ns' => 'required|int32|ge 0|le 999999999'
+            ]));
+        }
+        if ($ret && $this->getInput('tab', 'overview') === 'timeline_events') {
+            $ret = $this->validateInput(array_replace($fields, [
+                'before_eventid' => 'required|id', 'before_clock' => 'required|int32|ge 0'
             ]));
         }
         if ($ret && $this->getInput('tab', 'overview') === 'graphs'
@@ -85,6 +100,10 @@ class CControllerAnalistProblemPopup extends CController {
         $hostid = $this->getInput('hostid', 0);
         $tab = $this->getInput('tab', 'overview');
 
+        if ($tab === 'recurrences') {
+            $this->getRecurrenceCounts();
+            return;
+        }
 
 
         // Get event details
@@ -112,6 +131,19 @@ class CControllerAnalistProblemPopup extends CController {
 
         if ($tab === 'history') {
             $this->getMoreHistory($event);
+            return;
+        }
+        if ($tab === 'timeline_events') {
+            try {
+                $this->setResponse(new CControllerResponseData([
+                    'tab' => $tab, 'timeline_page' => $this->getTimelinePage($event)
+                ]));
+            }
+            catch (\Exception $exception) {
+                $this->setResponse((new CControllerResponseData(['main_block' => json_encode([
+                    'error' => ['messages' => [$exception->getMessage()]]
+                ])]))->disableView());
+            }
             return;
         }
 
@@ -400,9 +432,23 @@ class CControllerAnalistProblemPopup extends CController {
             }
         }
 
+        $timeline_page = null;
+        if ($tab === 'timeline') {
+            try {
+                $timeline_page = $this->getTimelinePage($event);
+            }
+            catch (\Exception $exception) {
+                $this->setResponse((new CControllerResponseData(['main_block' => json_encode([
+                    'error' => ['messages' => [$exception->getMessage()]]
+                ])]))->disableView());
+                return;
+            }
+        }
+
         // Prepare data for view
         $data = [
             'tab' => $tab,
+            'initial_tab' => $this->getInput('initial_tab', 'overview'),
             'is_fragment' => $this->getAction() === 'problemanalist.tab.get',
             'can_acknowledge' => $can_acknowledge,
             'can_comment' => $can_comment,
@@ -415,6 +461,7 @@ class CControllerAnalistProblemPopup extends CController {
             'pattern_events' => $pattern_events,
             'items' => $items,
             'monthly_comparison' => $monthly_comparison,
+            'timeline_page' => $timeline_page,
             'operational_data' => $operational_data,
             'graph_timeline' => $graph_timeline,
             'graph_layout' => $this->getInput('graph_layout', 'items'),
@@ -432,6 +479,92 @@ class CControllerAnalistProblemPopup extends CController {
     /**
      * Get comprehensive host data for hostcard display
      */
+    private function getTimelinePage(array $event): array {
+        $options = [
+            'output' => ['eventid', 'source', 'object', 'objectid', 'acknowledged', 'clock', 'ns', 'severity',
+                'r_eventid', 'cause_eventid'],
+            'selectAcknowledges' => ['userid', 'clock', 'message', 'action', 'old_severity', 'new_severity',
+                'suppress_until', 'taskid'],
+            'source' => EVENT_SOURCE_TRIGGERS, 'object' => EVENT_OBJECT_TRIGGER, 'value' => TRIGGER_VALUE_TRUE,
+            'objectids' => $event['objectid'], 'eventid_till' => $event['eventid'],
+            'sortfield' => ['clock', 'eventid'], 'sortorder' => ZBX_SORT_DOWN, 'limit' => 21
+        ];
+        $read = static function (array $query): array {
+            $events = API::Event()->get($query);
+            if (!is_array($events)) throw new \RuntimeException(_('Unable to load recent events.'));
+            return array_values($events);
+        };
+        if ($this->getInput('tab', 'overview') === 'timeline_events') {
+            $before_id = (string) $this->getInput('before_eventid');
+            $before_clock = (int) $this->getInput('before_clock');
+            $cursor_events = API::Event()->get([
+                'output' => ['eventid', 'source', 'object', 'objectid', 'clock', 'value'], 'eventids' => [$before_id]
+            ]);
+            $cursor = $cursor_events ? $cursor_events[0] : null;
+            if (!$cursor || (string) $cursor['objectid'] !== (string) $event['objectid']
+                    || (int) $cursor['source'] !== EVENT_SOURCE_TRIGGERS
+                    || (int) $cursor['object'] !== EVENT_OBJECT_TRIGGER || (int) $cursor['value'] !== TRIGGER_VALUE_TRUE
+                    || (int) $cursor['clock'] !== $before_clock || bccomp($before_id, (string) $event['eventid']) > 0) {
+                throw new \RuntimeException(_('Recent event not found or access denied.'));
+            }
+            // Same-second events first, then older seconds. Zabbix's BC Math scale is fractional;
+            // event IDs must remain integer strings for native API validation.
+            $events = bccomp($before_id, '1') > 0 ? $read(array_replace($options, [
+                'time_from' => $before_clock, 'time_till' => $before_clock, 'eventid_till' => bcsub($before_id, '1', 0)
+            ])) : [];
+            if (count($events) < 21 && $before_clock > 0) {
+                $events = array_merge($events, $read(array_replace($options, [
+                    'time_till' => $before_clock - 1, 'limit' => 21 - count($events)
+                ])));
+            }
+        }
+        else {
+            $events = $read($options);
+        }
+        $has_more = count($events) > 20;
+        $events = array_slice($events, 0, 20);
+        $last = $events ? $events[count($events) - 1] : null;
+        return ['events' => $events, 'has_more' => $has_more,
+            'cursor' => $last ? ['eventid' => (string) $last['eventid'], 'clock' => (int) $last['clock']] : null];
+    }
+
+    private function getRecurrenceCounts(): void {
+        try {
+            $eventids = array_values(array_unique($this->getInput('recurrence_eventids', [$this->getInput('eventid')])));
+            $events = API::Event()->get([
+                'output' => ['eventid', 'source', 'object', 'objectid', 'value'],
+                'eventids' => $eventids,
+                'source' => EVENT_SOURCE_TRIGGERS, 'object' => EVENT_OBJECT_TRIGGER, 'value' => TRIGGER_VALUE_TRUE
+            ]);
+            $events = array_values(array_filter($events ?: [], static function (array $event): bool {
+                return (int) $event['source'] === EVENT_SOURCE_TRIGGERS
+                    && (int) $event['object'] === EVENT_OBJECT_TRIGGER && (int) $event['value'] === TRIGGER_VALUE_TRUE;
+            }));
+            if (!$events) throw new \RuntimeException(_('Problem event not found or access denied.'));
+
+            $parser = new CRangeTimeParser();
+            $parser->parse('now-6M');
+            $time_from = $parser->getDateTime(true)->getTimestamp();
+            $time_till = time();
+            $counts = API::Event()->get([
+                'countOutput' => true, 'groupBy' => ['objectid'],
+                'source' => EVENT_SOURCE_TRIGGERS, 'object' => EVENT_OBJECT_TRIGGER, 'value' => TRIGGER_VALUE_TRUE,
+                'objectids' => array_values(array_unique(array_column($events, 'objectid'))),
+                'time_from' => $time_from, 'time_till' => $time_till
+            ]);
+            if (!is_array($counts)) throw new \RuntimeException(_('Unable to load recurrence counts.'));
+            $counts_by_trigger = [];
+            foreach ($counts as $count) $counts_by_trigger[$count['objectid']] = (string) $count['rowscount'];
+            $result = [];
+            foreach ($events as $event) $result[$event['eventid']] = $counts_by_trigger[$event['objectid']] ?? '0';
+            $response = ['counts' => (object) $result, 'time_from' => $time_from, 'time_till' => $time_till];
+        }
+        catch (\Exception $exception) {
+            $response = ['error' => ['messages' => [$exception->getMessage()]]];
+        }
+        $this->setResponse((new CControllerResponseData(['main_block' => json_encode($response)]))->disableView());
+    }
+
     private function getHostCardData($hostid) {
         $options = [
             'output' => ['hostid', 'name', 'status', 'maintenanceid', 'maintenance_status', 'maintenance_type',

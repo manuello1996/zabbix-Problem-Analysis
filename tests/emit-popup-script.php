@@ -36,18 +36,32 @@ class CWebUser {
 class CSettingsHelper {
     public const SEARCH_LIMIT = 'search_limit';
     public const PERIOD_DEFAULT = 'period_default';
-    public static function get($name) { return $name === self::PERIOD_DEFAULT ? '1d' : 100; }
+    public const PROBLEM_UNACK_STYLE = 'problem_unack_style';
+    public const PROBLEM_ACK_STYLE = 'problem_ack_style';
+    public const OK_UNACK_STYLE = 'ok_unack_style';
+    public const OK_ACK_STYLE = 'ok_ack_style';
+    public const BLINK_PERIOD = 'blink_period';
+    public static function get($name) {
+        if ($name === self::PERIOD_DEFAULT) return '1d';
+        if ($name === self::SEARCH_LIMIT) return 100;
+        return '0';
+    }
 }
 class CCsrfTokenHelper {
     public static function get($action) { return 'fixture-csrf-'.$action; }
 }
 class ViewApiFixture {
-    public function get($options) { return []; }
+    public function __construct(private string $kind = '') {}
+    public function get($options) {
+        if ($this->kind === 'trigger') return ['7' => ['triggerid' => '7', 'priority' => 2,
+            'manual_close' => ZBX_TRIGGER_MANUAL_CLOSE_ALLOWED]];
+        return [];
+    }
 }
 class API {
     public static function Event() { return new ViewApiFixture(); }
     public static function Alert() { return new ViewApiFixture(); }
-    public static function Trigger() { return new ViewApiFixture(); }
+    public static function Trigger() { return new ViewApiFixture('trigger'); }
     public static function User() { return new ViewApiFixture(); }
     public static function Mediatype() { return new ViewApiFixture(); }
 }
@@ -102,7 +116,17 @@ if ($scenario === 'graphs-before') {
         'from_ts' => $event['clock'] - 6 * SEC_PER_HOUR, 'to_ts' => $event['clock']
     ];
 }
+$timeline_events = [];
+if (in_array($scenario, ['timeline-page', 'timeline-more-page', 'timeline-final-page'])) {
+    $start = $scenario === 'timeline-page' ? 100 : ($scenario === 'timeline-more-page' ? 80 : 60);
+    for ($index = 0; $index < ($scenario === 'timeline-final-page' ? 3 : 20); $index++) {
+        $timeline_events[] = array_replace($event, ['eventid' => (string) ($start - $index),
+            'clock' => $event['clock'] - (100 - $start + $index), 'cause_eventid' => '0']);
+    }
+}
+$last_timeline_event = $timeline_events ? $timeline_events[count($timeline_events) - 1] : null;
 $view = new CView('problemanalist.view', [
+    'initial_tab' => $scenario === 'timeline-start' ? 'timeline' : 'overview',
     'tab' => $argv[1] ?? 'overview', 'event' => $event,
     'host' => ($argv[1] ?? 'overview') === 'host' ? null : $host, 'trigger' => $trigger,
     'is_fragment' => $scenario === 'fragment',
@@ -119,6 +143,10 @@ $view = new CView('problemanalist.view', [
     'items' => $graph_items,
     'graph_timeline' => $graph_timeline,
     'graph_layout' => $scenario === 'graphs-combined' ? 'combined' : 'items',
+    'timeline_page' => ['events' => $timeline_events,
+        'has_more' => $timeline_events && $scenario !== 'timeline-final-page',
+        'cursor' => $last_timeline_event
+            ? ['eventid' => $last_timeline_event['eventid'], 'clock' => $last_timeline_event['clock']] : null],
     'monthly_comparison' => ['months' => [['name' => 'March 2026', 'count' => 1, 'change_percentage' => 0]]]
 ]);
 $response = json_decode($view->getOutput(), true, 512, JSON_THROW_ON_ERROR);
