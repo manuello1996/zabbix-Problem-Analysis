@@ -1,505 +1,158 @@
 /* Each popup owns its requests, cached tabs and handlers. */
 (() => {
-    function initializePatterns(root, timePatternData) {
-        const jQuery = selector => window.jQuery(selector, root);
-        const hourlyData = timePatternData.hourlyData;
-        const weeklyData = timePatternData.weeklyData;
-        const weekdayLabels = timePatternData.weekLabels;
-        const hourLabels = timePatternData.hourLabels;
-        var createPatternCharts = function() {
-
-            if (typeof d3 === "undefined") {
-                createCSSFallbackCharts();
+    function initializePatterns(root, d, onLayout = () => {}) {
+        const panel = root.querySelector('[data-pattern-view]');
+        if (!panel) return null;
+        const lifecycle = new AbortController();
+        const filters = {month: null, day: null, weekday: null, hour: null};
+        let daysOpen = false;
+        const select = selector => panel.querySelector(selector);
+        const cells = Array.from(panel.querySelectorAll('[data-pattern-slot]'));
+        const filterBar = select('[data-pattern-filter]'), filterLabel = select('[data-pattern-filter-label]');
+        const status = select('[data-pattern-status]'), days = select('[data-pattern-days]');
+        const dayTitle = select('[data-pattern-day-title]');
+        const charts = Object.fromEntries(['month', 'day', 'hour', 'weekday'].map(kind => [kind,
+            Array.from(select('[data-pattern-bars="' + kind + '"]').querySelectorAll('[data-pattern-index]'), item => ({
+                item, index: Number(item.dataset.patternIndex), count: item.querySelector('[data-pattern-count]'),
+                bar: item.querySelector('[data-pattern-bar]'), interactive: item.hasAttribute('aria-pressed')
+            }))]));
+        const aggregate = () => {
+            const hourly = Array(24).fill(0), weekly = Array(7).fill(0);
+            const weeklyHourlyDetails = Array.from({length: 7}, () => Array(24).fill(0));
+            const monthly = d.monthKeys.map(() => 0);
+            const monthlyDailyDetails = d.monthDays.map(days => Array(days).fill(0));
+            let total = 0;
+            for (const [month, day, weekday, hour, count] of d.buckets) {
+                if ((filters.month !== null && month !== filters.month) || (filters.day !== null && day !== filters.day)) continue;
+                weeklyHourlyDetails[weekday][hour] += count;
+                if (filters.weekday !== null && (weekday !== filters.weekday || hour !== filters.hour)) continue;
+                hourly[hour] += count;
+                weekly[weekday] += count;
+                monthly[month] += count;
+                monthlyDailyDetails[month][day - 1] += count;
+                total += count;
+            }
+            return {hourly, weekly, weeklyHourlyDetails, monthly, monthlyDailyDetails, total};
+        };
+        const renderHeatmap = agg => {
+            for (const cell of cells) {
+                const weekday = Number(cell.dataset.weekday), hour = Number(cell.dataset.hour);
+                const count = agg.weeklyHourlyDetails[weekday][hour];
+                const selected = filters.weekday === weekday && filters.hour === hour;
+                if (cell.textContent !== String(count)) cell.textContent = String(count);
+                const intensity = count / d.scaleMax;
+                cell.dataset.level = count === 0 ? '0' : intensity > 0.8 ? '3' : intensity > 0.5 ? '2' : '1';
+                cell.setAttribute('aria-pressed', String(selected));
+                cell.classList.toggle('is-muted', filters.weekday !== null && !selected);
+                const label = d.weekLabels[weekday] + ' ' + d.hourLabels[hour] + '–'
+                    + String(hour + 1).padStart(2, '0') + ':00: ' + count + ' ' + d.incidents;
+                cell.title = label;
+                cell.setAttribute('aria-label', label);
+            }
+        };
+        const updateFilterBar = count => {
+            const labels = [];
+            if (filters.month !== null) labels.push(d.monthLabels[filters.month]);
+            if (filters.day !== null) labels.push(String(filters.day));
+            if (filters.weekday !== null) labels.push(d.weekLabels[filters.weekday] + ' ' + d.hourLabels[filters.hour]);
+            filterBar.hidden = labels.length === 0;
+            let label = d.filteredBy + ': ' + labels.join(' / ');
+            if (filters.weekday !== null && d.lastWeekStart >= d.fromTs && d.lastWeekEnd <= d.toTs) {
+                label += ' · ' + d.sameSlotLastWeek + ': ' + d.lastWeekCounts[filters.weekday][filters.hour];
+            }
+            filterLabel.textContent = label;
+            status.textContent = !d.total ? d.noEvents : count === 0 ? d.noMatches
+                : (labels.length ? d.selectedOccurrences : d.allOccurrences) + ': ' + count;
+            status.hidden = count > 0;
+        };
+        const renderBars = (kind, values, labels, active = null) => {
+            const max = Math.max(1, ...values);
+            for (const {item, index, count: countLabel, bar, interactive} of charts[kind]) {
+                item.hidden = index >= values.length;
+                if (item.hidden) continue;
+                const count = values[index];
+                const text = count > 0 || kind === 'month' || kind === 'day' ? String(count) : '';
+                if (countLabel.textContent !== text) countLabel.textContent = text;
+                const height = kind === 'hour' || kind === 'weekday' ? 110 : kind === 'day' ? 80 : 100;
+                bar.style.height = (count / max * height) + 'px';
+                bar.classList.toggle('is-empty', count === 0);
+                item.title = labels[index] + ': ' + count + ' ' + d.incidents;
+                if (interactive) {
+                    item.setAttribute('aria-pressed', String(index === active));
+                    item.setAttribute('aria-label', item.title);
+                }
+            }
+        };
+        const render = () => {
+            const agg = aggregate();
+            // Keep the selected date's heatmap visible as context while a slot filters the distributions.
+            renderHeatmap(agg);
+            renderBars('month', agg.monthly, d.monthLabels, filters.month);
+            renderBars('hour', agg.hourly, d.hourLabels);
+            renderBars('weekday', agg.weekly, d.weekLabels);
+            days.hidden = filters.month === null || !daysOpen;
+            if (filters.month !== null) {
+                dayTitle.textContent = d.monthLabels[filters.month];
+                renderBars('day', agg.monthlyDailyDetails[filters.month],
+                    Array.from({length: d.monthDays[filters.month]}, (_, i) => i + 1),
+                    filters.day === null ? null : filters.day - 1);
+            }
+            updateFilterBar(agg.total);
+            onLayout();
+        };
+        panel.addEventListener('click', event => {
+            const button = event.target.closest('[data-pattern-slot], [data-pattern-month], [data-pattern-day], [data-pattern-clear], [data-pattern-toggle], [data-pattern-hide-days]');
+            if (!button || !panel.contains(button)) return;
+            event.preventDefault();
+            if (button.hasAttribute('data-pattern-toggle')) {
+                const body = select('[data-pattern-body="' + button.dataset.patternToggle + '"]');
+                body.hidden = !body.hidden;
+                button.setAttribute('aria-expanded', String(!body.hidden));
+                button.textContent = body.hidden ? d.expandLabel : d.collapseLabel;
+                onLayout();
                 return;
-            }
-
-            // Hourly pattern chart
-            if (jQuery("#hourly-pattern-chart").length) {
-                createBarChart("#hourly-pattern-chart", hourlyData, hourLabels, "#0275b8");
-            }
-
-            // Weekly pattern chart
-            if (jQuery("#weekly-pattern-chart").length) {
-
-                createBarChart("#weekly-pattern-chart", weeklyData, weekdayLabels, "#28a745");
+            } else if (button.hasAttribute('data-pattern-hide-days')) {
+                daysOpen = false;
+            } else if (button.hasAttribute('data-pattern-clear')) {
+                Object.assign(filters, {month: null, day: null, weekday: null, hour: null});
+                daysOpen = false;
+            } else if (button.hasAttribute('data-pattern-month')) {
+                const month = Number(button.dataset.patternMonth);
+                filters.month = filters.month === month ? null : month;
+                filters.day = null;
+                daysOpen = filters.month !== null;
+            } else if (button.hasAttribute('data-pattern-day')) {
+                const day = Number(button.dataset.patternDay) + 1;
+                filters.day = filters.day === day ? null : day;
             } else {
-
+                const weekday = Number(button.dataset.weekday), hour = Number(button.dataset.hour);
+                const selected = filters.weekday === weekday && filters.hour === hour;
+                filters.weekday = selected ? null : weekday;
+                filters.hour = selected ? null : hour;
+                cells.forEach(cell => { cell.tabIndex = cell === button ? 0 : -1; });
             }
-        };
-
-        // CSS Fallback for when D3.js is not available
-        var createCSSFallbackCharts = function() {
-
-            // Hourly chart fallback
-            createCSSBarChart("#hourly-pattern-chart", hourlyData, hourLabels, "#0275b8");
-
-            // Weekly chart fallback
-            createCSSBarChart("#weekly-pattern-chart", weeklyData, weekdayLabels, "#28a745");
-        };
-
-        var createCSSBarChart = function(container, data, labels, color) {
-            var $container = jQuery(container);
-            if (!$container.length) return;
-
-            $container.empty();
-
-            // Define missing color variables
-            var emptyBarColor = "#e0e0e0";
-            var textColor = "#333333";
-            var labelColor = "#666666";
-
-            // Dark theme support
-            if (document.body.getAttribute("theme") === "dark-theme") {
-                emptyBarColor = "#3a3a3a";
-                textColor = "#cccccc";
-                labelColor = "#999999";
+            render();
+        }, {signal: lifecycle.signal});
+        panel.addEventListener('keydown', event => {
+            const cell = event.target.closest('[data-pattern-slot]');
+            if (!cell) return;
+            const index = cells.indexOf(cell), column = index % 24;
+            let next;
+            switch (event.key) {
+                case 'ArrowRight': next = index - column + (column + 1) % 24; break;
+                case 'ArrowLeft': next = index - column + (column + 23) % 24; break;
+                case 'ArrowDown': next = (index + 24) % cells.length; break;
+                case 'ArrowUp': next = (index + cells.length - 24) % cells.length; break;
+                case 'Home': next = index - column; break;
+                case 'End': next = index - column + 23; break;
+                default: return;
             }
-
-            var maxValue = Math.max.apply(Math, data);
-            if (maxValue === 0) maxValue = 1;
-
-            var chartHtml = "<div style=\"display: flex; align-items: end; height: 140px; gap: 2px; padding: 10px;\">";
-
-            for (var i = 0; i < data.length; i++) {
-                var height = (data[i] / maxValue) * 110;
-                var barColor = data[i] > 0 ? color : emptyBarColor;
-
-                chartHtml += "<div style=\"display: flex; flex-direction: column; align-items: center; flex: 1;\">";
-                chartHtml += "<div style=\"font-size: 10px; margin-bottom: 2px; color: " + textColor + ";\">" + (data[i] > 0 ? data[i] : "") + "</div>";
-                chartHtml += "<div style=\"background: " + barColor + "; width: 100%; height: " + height + "px; min-height: 2px;\"></div>";
-                chartHtml += "<div style=\"font-size: 8px; margin-top: 5px; color: " + labelColor + "; white-space: nowrap; text-align: center;\">" + labels[i] + "</div>";
-                chartHtml += "</div>";
-            }
-
-            chartHtml += "</div>";
-            $container.html(chartHtml);
-        };
-
-        var createBarChart = function(container, data, labels, color) {
-
-
-            var $container = jQuery(container);
-            if (!$container.length) {
-
-                return;
-            }
-
-            var containerEl = $container[0];
-            if (!containerEl.offsetWidth) {
-
-                createCSSBarChart(container, data, labels, color);
-                return;
-            }
-
-            var margin = {top: 15, right: 25, bottom: 35, left: 35};
-            var width = containerEl.offsetWidth - margin.left - margin.right;
-            var height = 140 - margin.top - margin.bottom;
-
-            if (width <= 0 || height <= 0) {
-
-                createCSSBarChart(container, data, labels, color);
-                return;
-            }
-
-            try {
-                // Clear previous chart
-                d3.select(root.querySelector(container)).selectAll("*").remove();
-
-                var svg = d3.select(root.querySelector(container))
-                    .append("svg")
-                    .attr("width", width + margin.left + margin.right)
-                    .attr("height", height + margin.top + margin.bottom)
-                    .append("g")
-                    .attr("transform", "translate(" + margin.left + "," + margin.top + ")");
-
-                var x = d3.scaleBand()
-                    .range([0, width])
-                    .domain(labels)
-                    .padding(0.1);
-
-                var y = d3.scaleLinear()
-                    .domain([0, d3.max(data) || 1])
-                    .range([height, 0]);
-
-                // Add bars
-                svg.selectAll(".bar")
-                    .data(data)
-                    .enter().append("rect")
-                    .attr("class", "bar")
-                    .attr("x", function(d, i) { return x(labels[i]); })
-                    .attr("width", x.bandwidth())
-                    .attr("y", function(d) { return y(d); })
-                    .attr("height", function(d) { return height - y(d); })
-                    .attr("fill", color)
-                    .attr("opacity", 0.8)
-                    .on("mouseover", function(event, d) {
-                        d3.select(this).attr("opacity", 1);
-                    })
-                    .on("mouseout", function(event, d) {
-                        d3.select(this).attr("opacity", 0.8);
-                    });
-
-                // Add labels on bars
-                svg.selectAll(".text")
-                    .data(data)
-                    .enter().append("text")
-                    .attr("x", function(d, i) { return x(labels[i]) + x.bandwidth()/2; })
-                    .attr("y", function(d) { return y(d) - 5; })
-                    .attr("text-anchor", "middle")
-                    .style("font-size", "10px")
-                    .style("fill", "#333")
-                    .text(function(d) { return d > 0 ? d : ""; });
-
-                                // Add X axis
-            svg.append("g")
-                .attr("transform", "translate(0," + height + ")")
-                .call(d3.axisBottom(x))
-                .selectAll("text")
-                .style("font-size", "9px")
-                .style("text-anchor", "middle");
-
-                // Add Y axis
-                svg.append("g")
-                    .call(d3.axisLeft(y).ticks(5))
-                    .selectAll("text")
-                    .style("font-size", "10px");
-
-
-
-            } catch (error) {
-                console.error("Error creating D3 chart:", error);
-
-                createCSSBarChart(container, data, labels, color);
-            }
-        };
-
-        var initAdvancedTimePatterns = function() {
-            var d = timePatternData;
-            if (!d || !jQuery("#mnz-investigation-heatmap").length || !jQuery("#mnz-investigation-monthly-chart").length) {
-                return;
-            }
-
-            var clocks = (d.eventClocks || []).map(function(t) { return parseInt(t, 10); }).filter(function(t) { return !isNaN(t); });
-            var monthKeys = d.monthKeys || [];
-            var isDark = document.body.getAttribute("theme") === "dark-theme" || document.documentElement.getAttribute("theme") === "dark-theme";
-            var barBg = isDark ? "#3a3a3a" : "#e9ecef";
-            var barFill = "#0275b8";
-            var textColor = isDark ? "#e0e0e0" : "#333333";
-            var labelColor = isDark ? "#999999" : "#666666";
-
-            var currentFilter = null;
-            var currentAgg = null;
-
-            var computeAggregates = function(clockList) {
-                var hourly = [];
-                var weekly = [];
-                var weeklyHourly = [];
-                var monthly = {};
-                var monthlyDaily = {};
-
-                for (var h = 0; h < 24; h++) hourly[h] = 0;
-                for (var w = 0; w < 7; w++) {
-                    weekly[w] = 0;
-                    weeklyHourly[w] = [];
-                    for (h = 0; h < 24; h++) weeklyHourly[w][h] = 0;
-                }
-
-                for (var m = 0; m < monthKeys.length; m++) {
-                    monthly[monthKeys[m]] = 0;
-                    monthlyDaily[monthKeys[m]] = [];
-                    for (var day = 0; day < 31; day++) monthlyDaily[monthKeys[m]][day] = 0;
-                }
-
-                for (var i = 0; i < clockList.length; i++) {
-                    var t = clockList[i];
-                    var dt = d.eventSlots[t];
-                    var hour = dt.hour;
-                    var weekday = dt.weekday;
-                    var ym = dt.month;
-                    var dIdx = dt.day - 1;
-
-                    hourly[hour]++;
-                    weekly[weekday]++;
-                    if (weeklyHourly[weekday]) weeklyHourly[weekday][hour]++;
-                    if (monthly[ym] !== undefined) {
-                        monthly[ym]++;
-                        if (monthlyDaily[ym] && dIdx >= 0 && dIdx < 31) monthlyDaily[ym][dIdx]++;
-                    }
-                }
-
-                var monthVals = [];
-                var monthDrill = [];
-                for (m = 0; m < monthKeys.length; m++) {
-                    var mk = monthKeys[m];
-                    monthVals.push(monthly[mk] || 0);
-                    monthDrill.push(monthlyDaily[mk] ? monthlyDaily[mk].slice(0, 31) : []);
-                }
-
-                return {
-                    hourly: hourly,
-                    weekly: weekly,
-                    monthly: monthVals,
-                    weeklyHourlyDetails: weeklyHourly,
-                    monthlyDailyDetails: monthDrill
-                };
-            };
-
-            var renderHeatmap = function(agg) {
-                var el = root.querySelector("#" + "mnz-investigation-heatmap");
-                if (!el) return;
-
-                var wh = agg.weeklyHourlyDetails || [];
-                var weekDisplayOrder = [1, 2, 3, 4, 5, 6, 0]; // Monday first, Sunday last
-                var maxVal = 0;
-                for (var w = 0; w < 7; w++) {
-                    for (var h = 0; h < 24; h++) {
-                        if (wh[w] && wh[w][h] > maxVal) maxVal = wh[w][h];
-                    }
-                }
-                if (maxVal === 0) maxVal = 1;
-
-                var html = "<div class=\"mnz-heatmap-grid\"><div class=\"mnz-heatmap-labels-col\"><div class=\"mnz-heatmap-corner\"></div>";
-                for (var wi = 0; wi < 7; wi++) {
-                    var weekdayIdx = weekDisplayOrder[wi];
-                    html += "<div class=\"mnz-heatmap-row-label\">" + (d.weekLabels[weekdayIdx] || "") + "</div>";
-                }
-                html += "</div><div class=\"mnz-heatmap-body\"><div class=\"mnz-heatmap-hours-row\">";
-                for (h = 0; h < 24; h++) html += "<div class=\"mnz-heatmap-hour-label\">" + (d.hourLabels[h] || h) + "</div>";
-                html += "</div>";
-
-                for (wi = 0; wi < 7; wi++) {
-                    var rowWeekday = weekDisplayOrder[wi];
-                    html += "<div class=\"mnz-heatmap-row\">";
-                    for (h = 0; h < 24; h++) {
-                        var v = (wh[rowWeekday] && wh[rowWeekday][h]) || 0;
-                        var intensity = v / maxVal;
-                        var color = intensity > 0 ? (intensity > 0.5 ? (intensity > 0.8 ? "#c0392b" : "#e67e22") : "#27ae60") : barBg;
-                        var cls = v > 0 ? " mnz-heatmap-cell-active" : "";
-                        html += "<div class=\"mnz-heatmap-cell" + cls + "\" data-w=\"" + rowWeekday + "\" data-h=\"" + h + "\" style=\"background:" + color + "\" title=\"" + (d.weekLabels[rowWeekday] || "") + " " + (d.hourLabels[h] || h) + ": " + v + "\">" + v + "</div>";
-                    }
-                    html += "</div>";
-                }
-
-                html += "</div></div>";
-                el.innerHTML = html;
-
-                jQuery("#mnz-investigation-heatmap").off("click.analistPatterns", ".mnz-heatmap-cell-active").on("click.analistPatterns", ".mnz-heatmap-cell-active", function() {
-                    var center = jQuery(this);
-                    var weekday = parseInt(center.data("w"), 10);
-                    var hour = parseInt(center.data("h"), 10);
-                    var filtered = clocks.filter(function(t) {
-                        var dt = d.eventSlots[t];
-                        return dt.weekday === weekday && dt.hour === hour;
-                    });
-                    currentFilter = {type: "heatmap", weekday: weekday, hour: hour};
-                    currentAgg = computeAggregates(filtered);
-                    applyAndRender();
-                });
-            };
-
-            var renderMonthly = function(elId, data, labels) {
-                var el = root.querySelector("#" + elId);
-                if (!el) return;
-                var max = Math.max.apply(Math, data);
-                if (max === 0) max = 1;
-
-                var html = "<div class=\"mnz-investigation-monthly-bars\">";
-                for (var i = 0; i < data.length; i++) {
-                    var h = (data[i] / max) * 100;
-                    var col = data[i] > 0 ? (i === data.length - 1 ? "#ff9800" : barFill) : barBg;
-                    var cls = data[i] > 0 ? " mnz-bar-clickable" : "";
-
-                    html += "<div class=\"mnz-investigation-monthly-item" + cls + "\" data-index=\"" + i + "\" data-type=\"monthly\" title=\"" + labels[i] + ": " + data[i] + "\">";
-                    html += "<div style=\"font-size:11px;font-weight:bold;color:" + textColor + "\">" + data[i] + "</div>";
-                    html += "<div class=\"mnz-investigation-monthly-bar\" style=\"height:" + Math.max(h, 4) + "px;background:" + col + "\"></div>";
-                    html += "<span class=\"mnz-investigation-monthly-label\" style=\"color:" + labelColor + "\">" + labels[i] + "</span>";
-                    html += "</div>";
-                }
-                html += "</div>";
-                el.innerHTML = html;
-            };
-
-            var renderDrilldown = function(containerId, data, labels, title, barColor) {
-                var c = root.querySelector("#" + containerId);
-                if (!c) return;
-                var max = Math.max.apply(Math, data);
-                if (max === 0) max = 1;
-
-                var html = "<div class=\"mnz-drilldown-content\"><div class=\"mnz-drilldown-title\">" + title + "</div><div class=\"mnz-drilldown-subhint\">" + (d.hintDay || "") + "</div><div class=\"mnz-drilldown-chart\"><div class=\"mnz-investigation-bars\">";
-                for (var i = 0; i < data.length; i++) {
-                    var barH = (data[i] / max) * 80;
-                    var day = i + 1;
-                    var cls = data[i] > 0 ? " mnz-drilldown-day-bar mnz-bar-clickable" : "";
-                    var dayData = data[i] > 0 ? " data-day=\"" + day + "\"" : "";
-                    html += "<div class=\"mnz-investigation-bar-item mnz-drilldown-bar-item" + cls + "\"" + dayData + " title=\"" + labels[i] + ": " + data[i] + "\">";
-                    html += "<span class=\"mnz-drilldown-bar-value\">" + data[i] + "</span>";
-                    html += "<div class=\"mnz-investigation-bar\" style=\"height:" + Math.max(barH, 4) + "px;background:" + (data[i] > 0 ? barColor : barBg) + "\"></div>";
-                    html += "<span class=\"mnz-investigation-bar-label\">" + labels[i] + "</span>";
-                    html += "</div>";
-                }
-                html += "</div></div><button type=\"button\" class=\"btn btn-alt mnz-drilldown-close\">Close</button></div>";
-                c.innerHTML = html;
-                c.classList.add("mnz-drilldown-visible");
-            };
-
-            var countSameSlotLastWeek = function(weekday, hour) {
-                var lastWeekEnd = d.lastWeekEnd;
-                var lastWeekStart = d.lastWeekStart;
-                var n = 0;
-
-                for (var i = 0; i < clocks.length; i++) {
-                    var t = clocks[i];
-                    if (t >= lastWeekStart && t < lastWeekEnd) {
-                        var dt = d.eventSlots[t];
-                        if (dt.weekday === weekday && dt.hour === hour) n++;
-                    }
-                }
-
-                return n;
-            };
-
-            var countSameDayLastWeek = function(weekday) {
-                var lastWeekEnd = d.lastWeekEnd;
-                var lastWeekStart = d.lastWeekStart;
-                var n = 0;
-
-                for (var i = 0; i < clocks.length; i++) {
-                    var t = clocks[i];
-                    if (t >= lastWeekStart && t < lastWeekEnd) {
-                        var dt = d.eventSlots[t];
-                        if (dt.weekday === weekday) n++;
-                    }
-                }
-
-                return n;
-            };
-
-            var updateFilterBar = function() {
-                var fb = root.querySelector("#" + "mnz-investigation-filter-bar");
-                if (!fb) return;
-
-                if (!currentFilter) {
-                    fb.innerHTML = "";
-                    fb.classList.remove("mnz-filter-active");
-                    return;
-                }
-
-                var label = "";
-                var compHtml = "";
-                if (currentFilter.type === "month") {
-                    label = (d.monthLabels || [])[currentFilter.value] || "";
-                }
-                else if (currentFilter.type === "day") {
-                    label = (currentFilter.dateStr || "") + " (" + ((d.weekLabels || [])[currentFilter.weekday] || "") + ")";
-                    var lastWeek = countSameDayLastWeek(currentFilter.weekday);
-                    compHtml = " <span class=\"mnz-filter-comparison\">" + (d.sameDayLastWeek || "") + ": " + lastWeek + " " + (d.incidents || "incidents") + "</span>";
-                }
-                else if (currentFilter.type === "heatmap") {
-                    label = (d.weekLabels || [])[currentFilter.weekday] + " " + ((d.hourLabels || [])[currentFilter.hour] || (currentFilter.hour + "h"));
-                    var slotWeek = countSameSlotLastWeek(currentFilter.weekday, currentFilter.hour);
-                    compHtml = " <span class=\"mnz-filter-comparison\">" + (d.sameSlotLastWeek || "") + ": " + slotWeek + " " + (d.incidents || "incidents") + "</span>";
-                }
-
-                fb.classList.add("mnz-filter-active");
-                fb.innerHTML = "<span class=\"mnz-filter-label\">" + (d.filteredBy || "Filtered by") + ": " + label + "</span>" + compHtml + " <button type=\"button\" class=\"btn btn-alt mnz-filter-clear\">" + (d.clearFilter || "Clear filter") + "</button>";
-
-                jQuery("#mnz-investigation-filter-bar .mnz-filter-clear").off("click.analistPatterns").on("click.analistPatterns", function() {
-                    currentFilter = null;
-                    currentAgg = computeAggregates(clocks);
-                    var m = jQuery("#mnz-monthly-drilldown");
-                    m.removeClass("mnz-drilldown-visible").empty().append("<div class=\"mnz-drilldown-hint mnz-drilldown-hint-monthly\">" + (d.hintMonth || "") + "</div>");
-                    applyAndRender();
-                });
-            };
-
-            var applyAndRender = function() {
-                currentAgg = currentAgg || computeAggregates(clocks);
-
-                createCSSBarChart("#hourly-pattern-chart", currentAgg.hourly, d.hourLabels || hourLabels, "#0275b8");
-                createCSSBarChart("#weekly-pattern-chart", currentAgg.weekly, d.weekLabels || weekdayLabels, "#28a745");
-                renderHeatmap(currentAgg);
-                renderMonthly("mnz-investigation-monthly-chart", currentAgg.monthly, d.monthLabels || []);
-
-                var dayLabels = (d.dayLabels && d.dayLabels.length) ? d.dayLabels.slice(0) : [];
-                while (dayLabels.length < 31) dayLabels.push(dayLabels.length + 1);
-
-                jQuery("#mnz-investigation-monthly-chart").off("click.analistPatterns", ".mnz-bar-clickable").on("click.analistPatterns", ".mnz-bar-clickable", function() {
-                    var idx = parseInt(jQuery(this).data("index"), 10);
-                    var mk = monthKeys[idx];
-                    if (!mk) return;
-
-                    var filtered = clocks.filter(function(t) {
-                        var dt = d.eventSlots[t];
-                        return dt.month === mk;
-                    });
-                    currentFilter = {type: "month", value: idx};
-                    currentAgg = computeAggregates(filtered);
-                    applyAndRender();
-
-                    var dd = currentAgg.monthlyDailyDetails[idx];
-                    if (dd) {
-                        renderDrilldown("mnz-monthly-drilldown", dd, dayLabels, "Daily distribution - " + (d.monthLabels[idx] || ""), barFill);
-                        jQuery("#mnz-monthly-drilldown .mnz-drilldown-close").off("click.analistPatterns").on("click.analistPatterns", function() {
-                            var c = jQuery("#mnz-monthly-drilldown");
-                            c.removeClass("mnz-drilldown-visible").empty().append("<div class=\"mnz-drilldown-hint mnz-drilldown-hint-monthly\">" + (d.hintMonth || "") + "</div>");
-                        });
-                    }
-
-                    jQuery("#mnz-monthly-drilldown").off("click.analistPatterns", ".mnz-drilldown-day-bar").on("click.analistPatterns", ".mnz-drilldown-day-bar", function() {
-                        var day = parseInt(jQuery(this).data("day"), 10);
-                        if (!day) return;
-
-                        var dateStr = mk + "-" + String(day).padStart(2, "0");
-                        var dayFiltered = clocks.filter(function(t) {
-                            var dt = d.eventSlots[t];
-                            var ds = dt.date;
-                            return ds === dateStr;
-                        });
-
-                        var parts = dateStr.split("-");
-                        var sampleDate = new Date(Date.UTC(parseInt(parts[0], 10), parseInt(parts[1], 10) - 1, parseInt(parts[2], 10)));
-                        var weekday = sampleDate.getUTCDay();
-                        var hourly = [];
-                        var wh = [];
-                        for (var h = 0; h < 24; h++) hourly[h] = 0;
-                        for (var w = 0; w < 7; w++) {
-                            wh[w] = [];
-                            for (h = 0; h < 24; h++) wh[w][h] = 0;
-                        }
-                        for (var cIdx = 0; cIdx < dayFiltered.length; cIdx++) {
-                            var dtf = d.eventSlots[dayFiltered[cIdx]];
-                            hourly[dtf.hour]++;
-                        }
-                        for (h = 0; h < 24; h++) wh[weekday][h] = hourly[h];
-
-                        currentFilter = {type: "day", monthIdx: idx, day: day, weekday: weekday, dateStr: dateStr};
-                        currentAgg = {
-                            hourly: hourly,
-                            weekly: [0, 0, 0, 0, 0, 0, 0],
-                            monthly: currentAgg.monthly,
-                            weeklyHourlyDetails: wh,
-                            monthlyDailyDetails: currentAgg.monthlyDailyDetails
-                        };
-
-                        createCSSBarChart("#hourly-pattern-chart", currentAgg.hourly, d.hourLabels || hourLabels, "#0275b8");
-                        renderHeatmap(currentAgg);
-                        updateFilterBar();
-                        root.querySelector("#mnz-investigation-heatmap").scrollIntoView({block: "nearest"});
-                    });
-                });
-
-                updateFilterBar();
-            };
-
-            currentAgg = computeAggregates(clocks);
-            applyAndRender();
-            return applyAndRender;
-        };
-
-
-        const renderAdvanced = initAdvancedTimePatterns();
-        if (!renderAdvanced) createPatternCharts();
-        return {redraw: renderAdvanced || createPatternCharts};
+            event.preventDefault();
+            cells.forEach((button, i) => { button.tabIndex = i === next ? 0 : -1; });
+            cells[next].focus();
+        }, {signal: lifecycle.signal});
+        render();
+        return {redraw: render, destroy: () => lifecycle.abort()};
     }
 
     function createServiceUi(popup) {
@@ -507,20 +160,10 @@
         const serviceStatusLabels = popup.config.statusLabels;
         const slaLabels = popup.config.slaLabels;
         const labels = popup.config.serviceLabels;
-        const serviceRequests = new Map();
         let currentServices = [];
         function escapeServiceHtml(value) {
             return String(value ?? "").replace(/&/g, "&amp;").replace(/</g, "&lt;")
                 .replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/\x27/g, "&#39;");
-        }
-
-        function requestServices(parameters) {
-            return popup.fetchJson("problemanalist.service.get", parameters).then(result => {
-                if (!result.success || result.data === undefined) {
-                    throw new Error(result.error?.message || "Unable to load services");
-                }
-                return result.data;
-            });
         }
 
         function displayServicesTree(services) {
@@ -542,8 +185,7 @@
             tree.innerHTML = '<div class="services-summary-header"><h4>' + escapeServiceHtml(labels.matching)
                 + ' (' + services.length + ')</h4><p>' + escapeServiceHtml(labels.current) + '</p></div>'
                 + '<div class="analist-services-toolbar"><label>' + escapeServiceHtml(labels.search)
-                + '<input type="search" data-services-search autocomplete="off"></label>'
-                + '<button type="button" class="btn-alt" data-refresh-services>' + escapeServiceHtml(labels.refresh) + '</button></div>'
+                + '<input type="search" data-services-search autocomplete="off"></label></div>'
                 + '<div class="analist-services-list" data-services-matching>' + services.map(service => createServiceCard(service, true)).join('') + '</div>'
                 + '<p data-services-search-empty role="status" hidden>' + escapeServiceHtml(labels.empty) + '</p>'
                 + relatedHtml;
@@ -635,10 +277,7 @@
                 + escapeServiceHtml(getServiceStatusText(service.status)) + '</span></span></summary>'
                 + '<div class="analist-service-details">' + (path.length > 1 ? createHierarchyPath(path) : '')
                 + rules + '<h5 class="analist-service-details-heading">' + escapeServiceHtml(labels.details) + '</h5>'
-                + createServiceSlaInfo(service)
-                + '<button type="button" class="btn-alt" data-service-refresh data-service-action="' + id + '">'
-                + escapeServiceHtml(labels.refreshService) + '</button>'
-                + '<p data-service-feedback role="status" aria-live="polite"></p></div></details>';
+                + createServiceSlaInfo(service) + '</div></details>';
         }
 
         function getServiceStatusClass(status) {
@@ -654,43 +293,7 @@
             return Array.from(cards).find(card => card.dataset.serviceid === String(serviceid));
         }
 
-        function loadServiceSLI(serviceid) {
-            const key = String(serviceid);
-            if (serviceRequests.has(key)) return serviceRequests.get(key);
-            const card = findServiceCard(key);
-            const button = card?.querySelector('[data-service-refresh]');
-            const feedback = card?.querySelector('[data-service-feedback]');
-            if (button) button.disabled = true;
-            if (feedback) feedback.textContent = labels.refreshing;
-            const request = requestServices({serviceid: key}).then(service => {
-                if (popup.closed) return;
-                updateServiceSLIDisplay(key, service);
-                currentServices = currentServices.map(current => String(current.serviceid) === key ? {...current, ...service} : current);
-                if (feedback) feedback.textContent = labels.refreshed;
-                popup.scheduleLayout();
-            }).catch(error => {
-                if (!popup.closed && error.name !== 'AbortError' && feedback) feedback.textContent = error.message;
-            }).finally(() => {
-                serviceRequests.delete(key);
-                if (!popup.closed && button) button.disabled = false;
-            });
-            serviceRequests.set(key, request);
-            return request;
-        }
-
-        function updateServiceSLIDisplay(serviceid, service) {
-            const card = findServiceCard(serviceid);
-            if (!card) return;
-            const status = card.querySelector(".service-status");
-            status.className = "service-status " + getServiceStatusClass(service.status);
-            status.textContent = getServiceStatusText(service.status);
-            const sla = card.querySelector(".service-sla-info, .service-no-sla");
-            if (sla) sla.outerHTML = createServiceSlaInfo(service);
-            const summary = card.querySelector('[data-service-sla-summary]');
-            if (summary) summary.textContent = serviceSlaSummary(service);
-        }
-
-        function selectService(serviceid, refresh = false) {
+        function selectService(serviceid) {
             const tree = root.querySelector("#services-tree-container");
             if (!tree) return;
             tree.querySelectorAll(".service-card").forEach(card => {
@@ -705,7 +308,6 @@
                 selectedCard.classList.add("is-selected");
                 selectedCard.scrollIntoView({behavior: "smooth", block: "nearest"});
                 popup.scheduleLayout();
-                if (refresh) return loadServiceSLI(serviceid);
             }
         }
 
@@ -713,8 +315,7 @@
             const tree = root.querySelector("#services-tree-container");
             if (!tree) return;
             tree.innerHTML = '<div class="services-no-results"><p><strong>' + escapeServiceHtml(labels.none) + '</strong></p>'
-                + '<p>' + escapeServiceHtml(labels.explanation) + '</p><button type="button" class="btn-alt" data-refresh-services>'
-                + escapeServiceHtml(labels.refresh) + '</button></div>';
+                + '<p>' + escapeServiceHtml(labels.explanation) + '</p></div>';
         }
 
         return {displayServicesTree, displayNoServicesMessage, selectService, filterServices};
@@ -756,10 +357,50 @@
             this.recoveryTimer = null;
             this.waitingForRecovery = false;
             this.recoveryDelay = 1000;
+            this.dataVersion = 0;
+            this.refreshPromise = null;
+            this.historyRequests = new Map();
+            this.graphOptions = {};
+            this.graphRequest = null;
+            this.patternOptions = {};
+            this.patternRequest = null;
+            this.timelineRequest = null;
             root.addEventListener('click', event => this.onClick(event), {signal: this.lifecycle.signal});
             root.addEventListener('keydown', event => this.onKeyDown(event), {signal: this.lifecycle.signal});
             root.addEventListener('input', event => {
                 if (event.target.matches('[data-services-search]')) this.serviceUi.filterServices(event.target.value);
+            }, {signal: this.lifecycle.signal});
+            root.addEventListener('change', event => {
+                if (event.target.matches('[data-pattern-period]')) {
+                    const form = event.target.closest('[data-pattern-controls]');
+                    const custom = event.target.value === 'custom';
+                    form.querySelector('[data-pattern-custom-range]').hidden = !custom;
+                    form.querySelector('[type="submit"]').hidden = !custom;
+                    this.scheduleLayout();
+                    if (!custom) this.updatePatterns(form);
+                    return;
+                }
+                if (!event.target.matches('[data-graph-period], [data-graph-layout]')) return;
+                const form = event.target.closest('[data-graph-controls]');
+                if (!form) return;
+                const custom = form.querySelector('[name="graph_period"]').value === 'custom';
+                const range = form.querySelector('[data-graph-custom-range]');
+                if (range) range.hidden = !custom;
+                form.querySelector('[type="submit"]').hidden = !custom;
+                this.scheduleLayout();
+                if (!custom || event.target.matches('[data-graph-layout]')) this.updateGraphs(form);
+            }, {signal: this.lifecycle.signal});
+            root.addEventListener('submit', event => {
+                if (event.target.matches('[data-pattern-controls]')) {
+                    event.preventDefault();
+                    event.stopPropagation();
+                    this.updatePatterns(event.target);
+                    return;
+                }
+                if (!event.target.matches('[data-graph-controls]')) return;
+                event.preventDefault();
+                event.stopPropagation();
+                this.updateGraphs(event.target);
             }, {signal: this.lifecycle.signal});
             root.addEventListener('toggle', event => {
                 if (event.target.matches('details.service-card, details.analist-related-services')) this.scheduleLayout();
@@ -771,10 +412,58 @@
             root.addEventListener('load', imageSettled, {capture: true, signal: this.lifecycle.signal});
             root.addEventListener('error', imageSettled, {capture: true, signal: this.lifecycle.signal});
             this.dialogue = root.closest('[data-dialogueid]');
+            this.dialogue?.classList.add('analist-problem-dialogue');
+            const closeButton = this.dialogue?.querySelector('.btn-overlay-close');
+            if (closeButton) {
+                this.refreshButton = document.createElement('button');
+                this.refreshButton.type = 'button';
+                this.refreshButton.className = 'btn-alt analist-popup-refresh';
+                this.refreshButton.textContent = config.refreshLabel;
+                this.refreshButton.addEventListener('click', event => {
+                    event.preventDefault();
+                    this.refreshTab();
+                }, {signal: this.lifecycle.signal});
+                closeButton.before(this.refreshButton);
+            }
+            const cancelButton = this.dialogue?.querySelector('.overlay-dialogue-footer .js-cancel');
+            if (cancelButton) {
+                this.commentButton = document.createElement('button');
+                this.commentButton.type = 'button';
+                this.commentButton.className = 'btn-alt analist-popup-comment';
+                this.commentButton.textContent = config.addCommentLabel;
+                this.commentButton.addEventListener('click', event => {
+                    event.preventDefault();
+                    this.openCommentForm();
+                }, {signal: this.lifecycle.signal});
+                cancelButton.before(this.commentButton);
+            }
             this.dialogue?.addEventListener('dialogue.close', () => this.destroy(),
                 {once: true, signal: this.lifecycle.signal});
-            this.activateTab('overview');
+            this.activateTab(config.initialTab === 'timeline' ? 'timeline' : 'overview');
             this.trackPendingRecovery();
+        }
+
+        syncCommentButton() {
+            if (!this.commentButton || this.closed) return;
+            const form = this.root.querySelector('[data-comment-form]');
+            this.commentButton.hidden = !this.config.problemActions?.canComment;
+            this.commentButton.disabled = this.updatingProblem || this.refreshPromise !== null;
+            this.commentButton.setAttribute('aria-expanded', String(Boolean(form && !form.hidden && this.activeTab === 'update')));
+            if (form) this.commentButton.setAttribute('aria-controls', form.id);
+            else this.commentButton.removeAttribute('aria-controls');
+        }
+
+        async openCommentForm() {
+            if (this.closed || this.updatingProblem || this.refreshPromise || !this.config.problemActions?.canComment) return;
+            await this.activateTab('update');
+            if (this.closed || this.activeTab !== 'update' || !this.config.problemActions.canComment
+                    || !this.tabs.get('update')?.loaded) return;
+            const form = this.root.querySelector('[data-comment-form]');
+            if (!form) return;
+            form.hidden = false;
+            this.syncCommentButton();
+            this.root.querySelector('[data-problem-comment]')?.focus();
+            this.scheduleLayout();
         }
 
         trackPendingRecovery() {
@@ -782,6 +471,11 @@
                     || this.config.problemActions.recoveryReady) return;
             this.waitingForRecovery = true;
             const panel = this.panels.get('overview');
+            const status = panel.querySelector('[data-problem-status]');
+            if (status) {
+                status.textContent = this.config.problemActions.closingStatusLabel;
+                status.className = 'color-warning';
+            }
             if (!panel.querySelector('[data-recovery-row]')) {
                 panel.querySelector('[data-age-row]')?.remove();
                 panel.querySelector('.analist-problem-detail-table tbody')
@@ -794,7 +488,7 @@
         }
 
         onClick(event) {
-            const button = event.target.closest('[data-tab-target], [data-retry-tab], [data-service-action], [data-refresh-services], [data-problem-action], .mnz-pattern-toggle');
+            const button = event.target.closest('[data-tab-target], [data-retry-tab], [data-service-action], [data-problem-action], [data-history-more], [data-timeline-more]');
             if (!button || !this.root.contains(button)) return;
             if (button.dataset.tabTarget) {
                 event.preventDefault();
@@ -804,26 +498,16 @@
                 this.loadTab(button.dataset.retryTab);
             } else if (button.dataset.serviceAction) {
                 event.preventDefault();
-                this.serviceUi.selectService(button.dataset.serviceAction, button.hasAttribute("data-service-refresh"));
-            } else if (button.hasAttribute('data-refresh-services')) {
+                this.serviceUi.selectService(button.dataset.serviceAction);
+            } else if (button.hasAttribute('data-history-more')) {
                 event.preventDefault();
-                if (!this.tabs.get('services')?.promise) {
-                    this.tabs.delete('services');
-                    this.loadTab('services');
-                }
+                this.loadMoreHistory(button);
+            } else if (button.hasAttribute('data-timeline-more')) {
+                event.preventDefault();
+                this.loadMoreEvents(button);
             } else if (button.dataset.problemAction) {
                 event.preventDefault();
                 this.updateProblem(button.dataset.problemAction);
-            } else {
-                event.preventDefault();
-                const target = Array.from(this.root.querySelectorAll('.mnz-pattern-collapsible-body'))
-                    .find(body => body.id === button.dataset.target);
-                if (!target) return;
-                const expanded = target.style.display === 'none';
-                target.style.display = expanded ? 'block' : 'none';
-                button.textContent = expanded ? this.config.collapseLabel : this.config.expandLabel;
-                button.setAttribute('aria-expanded', String(expanded));
-                if (expanded) this.patternRenderer?.redraw();
             }
         }
 
@@ -858,6 +542,7 @@
                 panel.setAttribute('aria-hidden', String(name !== key));
             }
             this.activeTab = key;
+            this.syncCommentButton();
             this.scheduleLayout();
             return this.loadTab(key);
         }
@@ -870,6 +555,43 @@
                 const overlay = window.overlays_stack?.getById(this.dialogue.dataset.dialogueid);
                 if (overlay?.$dialogue?.[0] === this.dialogue) overlay.centerDialog?.();
             });
+        }
+
+        invalidateTabs() {
+            this.dataVersion++;
+            this.timelineRequest = null;
+            if (this.activeTab !== 'graphs') this.graphOptions = {};
+            if (this.activeTab !== 'patterns') this.patternOptions = {};
+            this.patternRequest = null;
+            this.graphRequest = null;
+            if (this.recoveryTimer !== null) window.clearTimeout(this.recoveryTimer);
+            this.recoveryTimer = null;
+            for (const request of this.requests) request.abort();
+            this.historyRequests.clear();
+            this.tabs.clear();
+            this.patternRenderer?.destroy();
+            this.patternRenderer = null;
+            for (const panel of this.panels.values()) {
+                panel.replaceChildren();
+                panel.removeAttribute('aria-busy');
+            }
+            this.serviceUi = createServiceUi(this);
+            this.syncCommentButton();
+        }
+
+        refreshTab() {
+            if (this.closed || this.updatingProblem) return Promise.resolve();
+            if (this.refreshPromise) return this.refreshPromise;
+            const key = this.activeTab;
+            this.invalidateTabs();
+            if (this.refreshButton) this.refreshButton.disabled = true;
+            this.refreshPromise = this.loadTab(key).finally(() => {
+                this.refreshPromise = null;
+                if (!this.closed && this.refreshButton) this.refreshButton.disabled = false;
+                this.syncCommentButton();
+            });
+            this.syncCommentButton();
+            return this.refreshPromise;
         }
 
         loadTab(key) {
@@ -890,46 +612,54 @@
                 params.tab = key;
                 if (this.config.eventData.hostid) params.hostid = this.config.eventData.hostid;
             }
+            if (key === 'graphs') Object.assign(params, this.graphOptions);
+            if (key === 'patterns') Object.assign(params, this.patternOptions);
             state.promise = this.fetchJson(action, params).then(result => {
-                if (this.closed) return;
-                if (key === 'services') {
-                    if (!result.success || !Array.isArray(result.data)) throw new Error(result.error?.message || 'Unable to load services');
-                    panel.innerHTML = '<div id="services-tree-container" class="services-container"></div>';
-                    if (result.data.length) this.serviceUi.displayServicesTree(result.data);
-                    else this.serviceUi.displayNoServicesMessage();
-                } else {
-                    if (typeof result.body !== 'string') throw new Error('Invalid tab response');
-                    panel.innerHTML = result.body;
-                    if (key === 'overview' && result.problem_actions) {
-                        if (this.waitingForRecovery && !result.problem_actions.recoveryReady) {
-                            result.problem_actions.closingPending = true;
-                        }
-                        this.config.problemActions = result.problem_actions;
-                        if (result.problem_actions.recoveryReady) {
-                            this.waitingForRecovery = false;
-                            if (this.recoveryTimer !== null) window.clearTimeout(this.recoveryTimer);
-                            this.recoveryTimer = null;
-                        } else {
-                            this.trackPendingRecovery();
-                        }
-                    }
-                    if (key === 'patterns') {
-                        if (!result.pattern_data) throw new Error('Invalid pattern response');
-                        this.patternRenderer = initializePatterns(this.root, result.pattern_data);
-                    }
-                }
+                if (this.closed || this.tabs.get(key) !== state) return;
+                this.renderTab(key, result);
                 state.loaded = true;
                 this.scheduleLayout();
             }).catch(error => {
-                if (!this.closed && error.name !== 'AbortError') this.showError(panel, key, error);
+                if (!this.closed && this.tabs.get(key) === state && error.name !== 'AbortError') {
+                    this.showError(panel, key, error);
+                }
             }).finally(() => {
                 state.promise = null;
-                if (!this.closed) {
+                if (!this.closed && this.tabs.get(key) === state) {
                     panel.removeAttribute('aria-busy');
+                    this.syncCommentButton();
                     this.scheduleLayout();
                 }
             });
             return state.promise;
+        }
+
+        renderTab(key, result) {
+            const panel = this.panels.get(key);
+            if (key === 'services') {
+                if (!result.success || !Array.isArray(result.data)) throw new Error(result.error?.message || 'Unable to load services');
+                panel.innerHTML = '<div id="services-tree-container" class="services-container"></div>';
+                if (result.data.length) this.serviceUi.displayServicesTree(result.data);
+                else this.serviceUi.displayNoServicesMessage();
+                return;
+            }
+            if (typeof result.body !== 'string') throw new Error('Invalid tab response');
+            if (key === 'patterns' && !Array.isArray(result.pattern_data?.buckets)) throw new Error('Invalid pattern response');
+            if (key === 'patterns') this.patternRenderer?.destroy();
+            panel.innerHTML = result.body;
+            if (key === 'update' && result.comment_actions) Object.assign(this.config.problemActions, result.comment_actions);
+            if (key === 'overview' && result.problem_actions) {
+                if (this.waitingForRecovery && !result.problem_actions.recoveryReady) result.problem_actions.closingPending = true;
+                this.config.problemActions = result.problem_actions;
+                if (result.problem_actions.recoveryReady) {
+                    this.waitingForRecovery = false;
+                    if (this.recoveryTimer !== null) window.clearTimeout(this.recoveryTimer);
+                    this.recoveryTimer = null;
+                } else {
+                    this.trackPendingRecovery();
+                }
+            }
+            if (key === 'patterns') this.patternRenderer = initializePatterns(this.root, result.pattern_data, () => this.scheduleLayout());
         }
 
         async fetchJson(action, params) {
@@ -950,6 +680,138 @@
             }
         }
 
+        updatePatterns(form) { return this.updatePeriod(form, 'patterns', 'pattern'); }
+        updateGraphs(form) { return this.updatePeriod(form, 'graphs', 'graph'); }
+
+        updatePeriod(form, key, prefix) {
+            if (this.closed || !this.root.contains(form)) return Promise.resolve();
+            const requestKey = prefix + 'Request';
+            if (this[requestKey]) return this[requestKey];
+            const period = form.querySelector('[name="' + prefix + '_period"]');
+            const layout = key === 'graphs' ? form.querySelector('[name="graph_layout"]') : null;
+            const options = {[prefix + '_period']: period.value};
+            if (key === 'graphs') options.graph_layout = layout?.value ?? 'items';
+            if (period.value === 'custom') {
+                options[prefix + '_from'] = form.querySelector('[data-' + prefix + '-from] input').value;
+                options[prefix + '_to'] = form.querySelector('[data-' + prefix + '-to] input').value;
+            }
+            const version = this.dataVersion, state = this.tabs.get(key);
+            const submit = form.querySelector('[type="submit"]');
+            const message = form.querySelector('[data-' + prefix + '-message]');
+            const selects = [period, layout].filter(Boolean);
+            const disabledStates = selects.map(select => select.disabled);
+            message.textContent = '';
+            submit.disabled = true;
+            selects.forEach(select => { select.disabled = true; });
+            form.setAttribute('aria-busy', 'true');
+            const request = this.fetchJson('problemanalist.tab.get', {
+                eventid: this.config.eventData.eventid, tab: key, ...options,
+                ...(this.config.eventData.hostid ? {hostid: this.config.eventData.hostid} : {})
+            }).then(result => {
+                if (this.closed || version !== this.dataVersion || this.tabs.get(key) !== state) return;
+                this.renderTab(key, result);
+                this[prefix + 'Options'] = options;
+                this.scheduleLayout();
+            }).catch(error => {
+                if (!this.closed && version === this.dataVersion && error.name !== 'AbortError'
+                        && this.root.contains(form)) message.textContent = error.message;
+            }).finally(() => {
+                if (this[requestKey] === request) this[requestKey] = null;
+                if (!this.closed && version === this.dataVersion && this.root.contains(form)) {
+                    submit.disabled = false;
+                    selects.forEach((select, index) => { select.disabled = disabledStates[index]; });
+                    form.removeAttribute('aria-busy');
+                    this.scheduleLayout();
+                }
+            });
+            this[requestKey] = request;
+            return request;
+        }
+
+        loadMoreEvents(button) {
+            const section = button.closest('[data-timeline-events]');
+            if (this.closed || !section || !this.root.contains(section)) return Promise.resolve();
+            if (this.timelineRequest) return this.timelineRequest;
+            const rows = section.querySelector('[data-timeline-table] tbody');
+            const message = section.querySelector('[data-timeline-message]');
+            const version = this.dataVersion;
+            button.disabled = true;
+            section.setAttribute('aria-busy', 'true');
+            message.textContent = '';
+            const request = this.fetchJson('problemanalist.tab.get', {
+                eventid: this.config.eventData.eventid, tab: 'timeline_events',
+                before_eventid: button.dataset.beforeEventid, before_clock: button.dataset.beforeClock
+            }).then(result => {
+                if (this.closed || version !== this.dataVersion || !this.root.contains(section)) return;
+                if (typeof result.body !== 'string' || typeof result.has_more !== 'boolean'
+                        || (result.has_more && !result.cursor)) throw new Error('Invalid recent events response');
+                rows.insertAdjacentHTML('beforeend', result.body);
+                if (result.cursor) {
+                    button.dataset.beforeEventid = result.cursor.eventid;
+                    button.dataset.beforeClock = result.cursor.clock;
+                }
+                button.hidden = !result.has_more;
+                if (!result.has_more) message.textContent = this.config.noMoreEventsLabel;
+                this.scheduleLayout();
+            }).catch(error => {
+                if (!this.closed && version === this.dataVersion && this.root.contains(section) && error.name !== 'AbortError') {
+                    message.textContent = error.message;
+                }
+            }).finally(() => {
+                if (this.timelineRequest === request) this.timelineRequest = null;
+                if (!this.closed && version === this.dataVersion && this.root.contains(section)) {
+                    button.disabled = false;
+                    section.removeAttribute('aria-busy');
+                    this.scheduleLayout();
+                }
+            });
+            this.timelineRequest = request;
+            return request;
+        }
+
+        loadMoreHistory(button) {
+            const row = button.closest('[data-history-item]');
+            if (this.closed || !row || !this.root.contains(row)) return Promise.resolve();
+            const itemid = row.dataset.historyItem;
+            if (this.historyRequests.has(row)) return this.historyRequests.get(row);
+            const values = row.querySelector('[data-history-values]');
+            const message = row.querySelector('[data-history-message]');
+            const version = this.dataVersion;
+            button.disabled = true;
+            row.setAttribute('aria-busy', 'true');
+            if (message) message.textContent = '';
+            const request = this.fetchJson('problemanalist.tab.get', {
+                eventid: this.config.eventData.eventid, tab: 'history', itemid,
+                before_clock: button.dataset.beforeClock, before_ns: button.dataset.beforeNs
+            }).then(result => {
+                if (this.closed || version !== this.dataVersion || !this.root.contains(row)) return;
+                if (typeof result.body !== 'string' || typeof result.has_more !== 'boolean'
+                        || (result.has_more && !result.cursor)) throw new Error('Invalid history response');
+                values.insertAdjacentHTML('beforeend', result.body);
+                if (result.cursor) {
+                    button.dataset.beforeClock = result.cursor.clock;
+                    button.dataset.beforeNs = result.cursor.ns;
+                }
+                button.hidden = !result.has_more;
+                if (!result.body && message) message.textContent = this.config.noMoreHistoryLabel;
+                this.scheduleLayout();
+            }).catch(error => {
+                if (!this.closed && version === this.dataVersion && this.root.contains(row)
+                        && error.name !== 'AbortError' && message) {
+                    message.textContent = error.message;
+                }
+            }).finally(() => {
+                if (this.historyRequests.get(row) === request) this.historyRequests.delete(row);
+                if (!this.closed && version === this.dataVersion && this.root.contains(row)) {
+                    button.disabled = false;
+                    row.removeAttribute('aria-busy');
+                    this.scheduleLayout();
+                }
+            });
+            this.historyRequests.set(row, request);
+            return request;
+        }
+
         showError(panel, key, error) {
             panel.textContent = '';
             const message = document.createElement('p');
@@ -965,25 +827,37 @@
 
         async updateProblem(action) {
             const actions = this.config.problemActions;
-            if (this.closed || this.updatingProblem || !actions) return;
+            if (this.closed || this.updatingProblem || this.refreshPromise || !actions) return;
+            const commenting = action === 'comment';
+            const comment = commenting ? this.root.querySelector('[data-problem-comment]') : null;
+            const messageSelector = commenting ? '[data-comment-message]' : '[data-problem-action-message]';
+            const message = this.root.querySelector(messageSelector);
             const fields = {
                 acknowledge: ['acknowledge_problem', actions.acknowledgeAction],
                 unacknowledge: ['unacknowledge_problem', actions.unacknowledgeAction],
                 close: ['close_problem', actions.closeAction],
                 'severity-up': ['change_severity', actions.severityAction],
-                'severity-down': ['change_severity', actions.severityAction]
+                'severity-down': ['change_severity', actions.severityAction],
+                comment: ['message', comment?.value]
             };
             const changingSeverity = action === 'severity-up' || action === 'severity-down';
-            if (!fields[action] || !(changingSeverity ? actions.canChangeSeverity
+            if (!fields[action] || !(commenting ? actions.canComment : changingSeverity ? actions.canChangeSeverity
                     : action === 'close' ? actions.canClose : actions.canAcknowledge)) return;
+            if (commenting && !comment?.value.trim()) {
+                if (message) message.textContent = actions.emptyCommentLabel;
+                comment?.focus();
+                return;
+            }
             const nextSeverity = Number(actions.severity) + (action === 'severity-up' ? 1 : -1);
             if (changingSeverity && (!Number.isInteger(nextSeverity)
                     || nextSeverity < actions.minSeverity || nextSeverity > actions.maxSeverity)) return;
             this.updatingProblem = true;
+            this.syncCommentButton();
+            if (this.refreshButton) this.refreshButton.disabled = true;
+            if (comment) comment.disabled = true;
             const buttons = Array.from(this.root.querySelectorAll('[data-problem-action]'));
             const disabledStates = buttons.map(button => button.disabled);
             buttons.forEach(button => { button.disabled = true; });
-            const message = this.root.querySelector('[data-problem-action-message]');
             if (message) message.textContent = '';
             let updated = false;
             try {
@@ -1001,19 +875,18 @@
                     this.config.problemActions.closingPending = true;
                     this.trackPendingRecovery();
                 }
-                // Historical panels may now contain stale acknowledgements or close state.
-                for (const request of this.requests) request.abort();
-                this.tabs.clear();
-                this.patternRenderer = null;
-                await this.activateTab('overview');
-                const refreshedMessage = this.root.querySelector('[data-problem-action-message]');
-                if (refreshedMessage) refreshedMessage.textContent = actions.updatedLabel;
+                // Discard stale panels and fetch only the tab needed after the update.
+                this.invalidateTabs();
+                const targetTab = commenting ? 'update' : 'overview';
+                await this.activateTab(targetTab);
+                const refreshedMessage = this.root.querySelector(messageSelector);
+                if (refreshedMessage) refreshedMessage.textContent = commenting ? actions.commentAddedLabel : actions.updatedLabel;
                 if (action === 'close' && !this.config.problemActions.recoveryReady) {
                     this.config.problemActions.closingPending = true;
                     this.trackPendingRecovery();
                 }
-                if (!this.tabs.get('overview')?.loaded && !this.closed) {
-                    const panel = this.panels.get('overview');
+                if (!this.tabs.get(targetTab)?.loaded && !this.closed) {
+                    const panel = this.panels.get(targetTab);
                     panel.querySelector('[role="alert"]')?.replaceChildren(actions.refreshErrorLabel);
                 }
                 if (window.jQuery) window.jQuery.publish?.('acknowledge.create', [result]);
@@ -1021,12 +894,16 @@
                 if (!this.closed && error.name !== 'AbortError' && message) message.textContent = error.message;
             } finally {
                 this.updatingProblem = false;
+                this.syncCommentButton();
+                if (!this.closed && this.refreshButton) this.refreshButton.disabled = false;
+                if (!this.closed && comment) comment.disabled = false;
                 if (!updated && !this.closed) buttons.forEach((button, index) => { button.disabled = disabledStates[index]; });
             }
         }
 
         scheduleRecoveryRefresh() {
-            if (this.closed || !this.waitingForRecovery || this.recoveryTimer !== null) return;
+            if (this.closed || !this.waitingForRecovery || this.recoveryTimer !== null || !this.tabs.has('overview')) return;
+            const version = this.dataVersion;
             this.recoveryTimer = window.setTimeout(async () => {
                 this.recoveryTimer = null;
                 if (this.closed) return;
@@ -1034,10 +911,12 @@
                     const params = {eventid: this.config.eventData.eventid, tab: 'overview'};
                     if (this.config.eventData.hostid) params.hostid = this.config.eventData.hostid;
                     const result = await this.fetchJson('problemanalist.tab.get', params);
+                    if (version !== this.dataVersion) return;
                     if (typeof result.body !== 'string' || !result.problem_actions) throw new Error('Invalid overview response');
                     // Refresh the existing panel without changing the tab the user is viewing.
                     this.panels.get('overview').innerHTML = result.body;
                     this.config.problemActions = result.problem_actions;
+                    this.syncCommentButton();
                     this.tabs.set('overview', {loaded: true, promise: null});
                     this.waitingForRecovery = !result.problem_actions.recoveryReady;
                     if (this.waitingForRecovery) {
@@ -1049,7 +928,7 @@
                         ? result.problem_actions.closingLabel : result.problem_actions.updatedLabel;
                     this.scheduleLayout();
                 } catch (error) {
-                    if (this.closed) return;
+                    if (this.closed || version !== this.dataVersion) return;
                     const message = this.root.querySelector('[data-problem-action-message]');
                     if (message) message.textContent = this.config.problemActions.closingLabel + ' ' + error.message;
                     // A transient read failure must not lose tracking of an accepted manual close.
@@ -1068,12 +947,19 @@
             if (this.layoutFrame !== null) window.cancelAnimationFrame(this.layoutFrame);
             this.layoutFrame = null;
             this.lifecycle.abort();
+            this.dialogue?.classList.remove('analist-problem-dialogue');
+            this.refreshButton?.remove();
+            this.commentButton?.remove();
             for (const controller of this.requests) controller.abort();
             this.requests.clear();
-            if (window.jQuery) {
-                window.jQuery(this.root).find('*').addBack().off('.analistPatterns').stop(true, true);
-            }
             this.tabs.clear();
+            this.historyRequests.clear();
+            this.graphRequest = null;
+            this.graphOptions = {};
+            this.timelineRequest = null;
+            this.patternRequest = null;
+            this.patternOptions = {};
+            this.patternRenderer?.destroy();
             this.patternRenderer = null;
             AnalistProblemPopup.instances.delete(this);
         }

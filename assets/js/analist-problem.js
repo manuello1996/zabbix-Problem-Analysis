@@ -3,6 +3,7 @@ document.addEventListener('DOMContentLoaded', () => {
         constructor() {
             this.pendingUpdate = null;
             this.events = new AbortController();
+            this.initRecurrences();
             this.observer = new MutationObserver(records => {
                 window.AnalistProblemPopup?.cleanupDetached();
                 const selector = '.flickerfreescreen, .dashboard-widget-problems';
@@ -23,6 +24,7 @@ document.addEventListener('DOMContentLoaded', () => {
             window.addEventListener('pagehide', () => this.suspend(), {signal: this.events.signal});
             window.addEventListener('pageshow', event => {
                 if (event.persisted) {
+                    this.suspended = false;
                     this.observer.observe(document.body, {childList: true, subtree: true});
                     this.scheduleUpdate();
                 }
@@ -41,6 +43,16 @@ document.addEventListener('DOMContentLoaded', () => {
             clearTimeout(this.pendingUpdate);
             this.pendingUpdate = null;
             this.observer.disconnect();
+            this.suspended = true;
+            this.recurrenceObserver?.disconnect();
+            clearTimeout(this.recurrenceTimer);
+            this.recurrenceTimer = null;
+            this.recurrenceRequest?.abort();
+            this.recurrenceRequest = null;
+            this.recurrenceQueue.clear();
+            for (const group of this.recurrenceGroups.values()) {
+                if (group.status === 'loading' || group.status === 'queued') group.status = 'idle';
+            }
         }
 
         destroy() {
@@ -54,6 +66,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
             // Adiciona botões nos widgets da dashboard
             this.addLTSButtonToDashboardWidgets();
+            this.pruneRecurrences();
         }
 
         addLTSButtonToMainTable() {
@@ -83,22 +96,190 @@ document.addEventListener('DOMContentLoaded', () => {
                 cell.textContent = 'Details';
                 header.appendChild(cell);
             }
-            problems.forEach(({row, data}) => this.addLTSColumnToRow(row, data, isWidget));
+            if (!header.querySelector('.analist-recurrences-header')) {
+                const cell = document.createElement('th');
+                cell.className = 'analist-recurrences-header';
+                cell.textContent = 'last 6M';
+                cell.title = 'Problem occurrences in the last 6 months';
+                header.insertBefore(cell, header.querySelector('.lts-header'));
+            }
+            problems.forEach(({row, data}) => {
+                this.addLTSColumnToRow(row, data, isWidget);
+                this.addRecurrenceColumnToRow(row, data);
+            });
             const columnCount = Array.from(header.cells).reduce((sum, cell) => sum + cell.colSpan, 0);
+            const problemRows = new Set(problems.map(problem => problem.row));
             rows.forEach(row => {
-                if (row.querySelector('.lts-column-cell') || !row.cells.length) return;
+                if (!row.cells.length || problemRows.has(row)) return;
                 const count = Array.from(row.cells).reduce((sum, cell) => sum + cell.colSpan, 0);
-                if (count !== columnCount - 1) return;
+                const missing = columnCount - count;
+                if (missing < 1 || missing > 2) return;
                 // Timeline separators and empty-state rows usually end in a spanning cell.
                 const last = row.cells[row.cells.length - 1];
                 if (last.colSpan > 1 || row.cells.length === 1) {
-                    last.colSpan++;
+                    last.colSpan += missing;
                 } else {
-                    const spacer = document.createElement('td');
-                    spacer.className = 'lts-column-cell';
-                    row.appendChild(spacer);
+                    if (!row.querySelector('.analist-recurrences-cell')) {
+                        const spacer = document.createElement('td');
+                        spacer.className = 'analist-recurrences-cell';
+                        row.insertBefore(spacer, row.querySelector('.lts-column-cell'));
+                    }
+                    if (!row.querySelector('.lts-column-cell')) {
+                        const spacer = document.createElement('td');
+                        spacer.className = 'lts-column-cell';
+                        row.appendChild(spacer);
+                    }
                 }
             });
+        }
+
+        initRecurrences() {
+            this.suspended = false;
+            this.recurrenceGroups = new Map();
+            this.recurrenceQueue = new Set();
+            this.recurrenceTimer = null;
+            this.recurrenceRequest = null;
+            this.recurrenceObserver = typeof IntersectionObserver === 'function'
+                ? new IntersectionObserver(entries => {
+                    for (const entry of entries) {
+                        if (!entry.isIntersecting) continue;
+                        this.recurrenceObserver.unobserve(entry.target);
+                        const record = entry.target.analistRecurrences;
+                        if (record) this.queueRecurrences(record.group);
+                    }
+                }, {rootMargin: '100px'}) : null;
+        }
+
+        addRecurrenceColumnToRow(row, data) {
+            let cell = row.querySelector('.analist-recurrences-cell');
+            if (!cell) {
+                cell = document.createElement('td');
+                cell.className = 'analist-recurrences-cell';
+                row.insertBefore(cell, row.querySelector('.lts-column-cell'));
+            }
+            const key = data.triggerid ? 'trigger:' + data.triggerid : 'event:' + data.eventid;
+            let group = this.recurrenceGroups.get(key);
+            if (!group) {
+                group = {key, cells: new Set(), status: 'idle', expires: 0};
+                this.recurrenceGroups.set(key, group);
+            }
+            let record = cell.analistRecurrences;
+            if (!record) {
+                const button = document.createElement('button');
+                button.type = 'button';
+                button.className = 'btn-link js-analist-recurrences';
+                cell.appendChild(button);
+                record = {cell, button, group, data};
+                cell.analistRecurrences = record;
+                button.addEventListener('click', event => {
+                    event.preventDefault();
+                    event.stopPropagation();
+                    if (record.group.status === 'ready') this.openLTSModal(record.data, 'timeline');
+                    else if (record.group.status === 'error') this.queueRecurrences(record.group);
+                }, {signal: this.events.signal});
+            }
+            record.group.cells.delete(record);
+            record.group = group;
+            record.data = data;
+            group.cells.add(record);
+            if (group.status === 'ready' && Date.now() >= group.expires) group.status = 'idle';
+            this.renderRecurrences(group, record);
+            if (group.status === 'idle' && !this.suspended) {
+                if (this.recurrenceObserver) this.recurrenceObserver.observe(cell);
+                else this.queueRecurrences(group);
+            }
+        }
+
+        renderRecurrences(group, record = null) {
+            const ready = group.status === 'ready';
+            const failed = group.status === 'error';
+            for (const {cell, button} of record ? [record] : group.cells) {
+                if (!cell.isConnected) continue;
+                const text = ready ? group.count : failed ? 'Retry' : '…';
+                if (button.textContent !== text) button.textContent = text;
+                button.disabled = !ready && !failed;
+                button.title = ready ? 'Show timeline — occurrences in the last 6 months'
+                    : failed ? group.error : 'Loading occurrences in the last 6 months';
+                button.setAttribute('aria-label', ready ? `Show timeline: ${group.count} occurrences in the last 6 months`
+                    : failed ? 'Retry loading recurrences' : 'Loading recurrences');
+                cell.setAttribute('aria-busy', String(!ready && !failed));
+            }
+        }
+
+        queueRecurrences(group) {
+            if (this.suspended || this.recurrenceGroups.get(group.key) !== group || !group.cells.size
+                    || group.status === 'loading' || group.status === 'queued'
+                    || (group.status === 'ready' && Date.now() < group.expires)) return;
+            group.status = 'queued';
+            this.recurrenceQueue.add(group);
+            this.renderRecurrences(group);
+            if (this.recurrenceTimer === null && !this.recurrenceRequest) {
+                this.recurrenceTimer = setTimeout(() => {
+                    this.recurrenceTimer = null;
+                    this.flushRecurrences();
+                }, 50);
+            }
+        }
+
+        async flushRecurrences() {
+            if (this.suspended || this.recurrenceRequest) return;
+            this.pruneRecurrences();
+            const groups = Array.from(this.recurrenceQueue).slice(0, 40);
+            if (!groups.length) return;
+            const eventids = groups.map(group => {
+                this.recurrenceQueue.delete(group);
+                group.status = 'loading';
+                return group.cells.values().next().value.data.eventid;
+            });
+            const controller = new AbortController();
+            this.recurrenceRequest = controller;
+            try {
+                const body = new URLSearchParams([['eventid', eventids[0]], ['tab', 'recurrences'],
+                    ...eventids.map(eventid => ['recurrence_eventids[]', eventid])]);
+                const response = await fetch('zabbix.php?action=problemanalist.tab.get', {
+                    method: 'POST', body, signal: controller.signal, cache: 'no-store'
+                });
+                if (!response.ok) throw new Error('Unable to load recurrence counts');
+                const result = await response.json();
+                if (this.suspended || controller.signal.aborted || this.recurrenceRequest !== controller) return;
+                if (result.error) throw new Error(result.error.messages?.join(' ') || 'Unable to load recurrence counts');
+                for (let index = 0; index < groups.length; index++) {
+                    const group = groups[index];
+                    const count = result.counts?.[eventids[index]];
+                    group.status = count !== undefined && /^\d+$/.test(String(count)) ? 'ready' : 'error';
+                    group.count = String(count);
+                    group.expires = Date.now() + 60000;
+                    group.error = 'Problem event not found or access denied';
+                    this.renderRecurrences(group);
+                }
+            } catch (error) {
+                if (this.suspended || controller.signal.aborted || this.recurrenceRequest !== controller) return;
+                for (const group of groups) {
+                    group.status = 'error';
+                    group.error = error.message;
+                    this.renderRecurrences(group);
+                }
+            } finally {
+                if (this.recurrenceRequest === controller) {
+                    this.recurrenceRequest = null;
+                    this.flushRecurrences();
+                }
+            }
+        }
+
+        pruneRecurrences() {
+            for (const [key, group] of this.recurrenceGroups) {
+                for (const record of group.cells) {
+                    if (!record.cell.isConnected) {
+                        this.recurrenceObserver?.unobserve(record.cell);
+                        group.cells.delete(record);
+                    }
+                }
+                if (!group.cells.size) {
+                    this.recurrenceGroups.delete(key);
+                    this.recurrenceQueue.delete(group);
+                }
+            }
         }
 
         extractProblemDataFromMenuPopup(row) {
@@ -367,11 +548,12 @@ document.addEventListener('DOMContentLoaded', () => {
             lastCell.appendChild(button);
         }
 
-        openLTSModal(problemData) {
+        openLTSModal(problemData, initialTab = 'overview') {
             //console.log('AnalistProblem - Abrindo modal com dados:', problemData);
 
             const params = new URLSearchParams({
                 eventid: problemData.eventid,
+                ...(initialTab === 'timeline' && {initial_tab: 'timeline'}),
                 ...(problemData.triggerid && { triggerid: problemData.triggerid }),
                 ...(problemData.hostid && { hostid: problemData.hostid }),
                 ...(problemData.hostname && { hostname: problemData.hostname }),

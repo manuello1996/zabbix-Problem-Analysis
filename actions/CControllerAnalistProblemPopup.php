@@ -14,6 +14,9 @@ use CMacrosResolverHelper;
 use CSettingsHelper;
 use CSeverityHelper;
 use CRoleHelper;
+use CRangeTimeParser;
+use CParser;
+use CTimePeriodHelper;
 use Manager;
 
 /**
@@ -28,17 +31,61 @@ class CControllerAnalistProblemPopup extends CController {
     protected function checkInput(): bool {
         $fields = [
             'eventid'       => 'required|id',
-            'tab'           => 'string|in overview,host,timeline,patterns,graphs,update',
+            'tab'           => 'string|in overview,host,timeline,timeline_events,patterns,graphs,update,history,recurrences',
+            'initial_tab'   => 'in overview,timeline',
+            'recurrence_eventids' => 'array_id',
             'triggerid'     => 'id',
             'hostid'        => 'id',
             'hostname'      => 'string',
             'problem_name'  => 'string',
             'severity'      => 'int32',
             'clock'         => 'int32',
-            'acknowledged'  => 'int32'
+            'acknowledged'  => 'int32',
+            'itemid'        => 'id',
+            'before_clock'  => 'int32|ge 0',
+            'before_ns'     => 'int32|ge 0|le 999999999',
+            'before_eventid' => 'id',
+            'graph_period'  => 'in around,before,duration,day,custom',
+            'graph_layout'  => 'in items,combined',
+            'graph_from'    => 'range_time',
+            'graph_to'      => 'range_time',
+            'pattern_period' => 'in 1,3,6,12,custom',
+            'pattern_from' => 'range_time',
+            'pattern_to' => 'range_time'
         ];
 
         $ret = $this->validateInput($fields);
+        if ($ret && $this->getInput('tab', 'overview') === 'recurrences') {
+            $eventids = $this->getInput('recurrence_eventids', [$this->getInput('eventid')]);
+            if (!$eventids || count($eventids) > 40) {
+                error(_('Select between 1 and 40 problem events.'));
+                $ret = false;
+            }
+        }
+        if ($ret && $this->getInput('tab', 'overview') === 'history') {
+            $ret = $this->validateInput(array_replace($fields, [
+                'itemid' => 'required|id',
+                'before_clock' => 'required|int32|ge 0',
+                'before_ns' => 'required|int32|ge 0|le 999999999'
+            ]));
+        }
+        if ($ret && $this->getInput('tab', 'overview') === 'timeline_events') {
+            $ret = $this->validateInput(array_replace($fields, [
+                'before_eventid' => 'required|id', 'before_clock' => 'required|int32|ge 0'
+            ]));
+        }
+        if ($ret && $this->getInput('tab', 'overview') === 'graphs'
+                && $this->getInput('graph_period', 'around') === 'custom') {
+            $ret = $this->validateInput(array_replace($fields, [
+                'graph_from' => 'required|range_time', 'graph_to' => 'required|range_time'
+            ]));
+        }
+        if ($ret && $this->getInput('tab', 'overview') === 'patterns'
+                && $this->getInput('pattern_period', '12') === 'custom') {
+            $ret = $this->validateInput(array_replace($fields, [
+                'pattern_from' => 'required|range_time', 'pattern_to' => 'required|range_time'
+            ]));
+        }
 
         if (!$ret) {
             $this->setResponse(
@@ -62,6 +109,10 @@ class CControllerAnalistProblemPopup extends CController {
         $hostid = $this->getInput('hostid', 0);
         $tab = $this->getInput('tab', 'overview');
 
+        if ($tab === 'recurrences') {
+            $this->getRecurrenceCounts();
+            return;
+        }
 
 
         // Get event details
@@ -70,7 +121,7 @@ class CControllerAnalistProblemPopup extends CController {
                 'severity', 'opdata', 'r_eventid'
             ],
             'eventids' => $eventid,
-            'selectTags' => ['tag', 'value'],
+            'selectTags' => $tab === 'overview' ? ['tag', 'value'] : null,
             'selectAcknowledges' => $tab === 'update' ? ['acknowledgeid', 'clock', 'userid', 'message', 'action',
                 'old_severity', 'new_severity', 'suppress_until'
             ] : null
@@ -84,6 +135,24 @@ class CControllerAnalistProblemPopup extends CController {
             $this->setResponse((new CControllerResponseData(['main_block' => json_encode([
                 'error' => ['messages' => [_('Problem event not found or access denied.')]]
             ])]))->disableView());
+            return;
+        }
+
+        if ($tab === 'history') {
+            $this->getMoreHistory($event);
+            return;
+        }
+        if ($tab === 'timeline_events') {
+            try {
+                $this->setResponse(new CControllerResponseData([
+                    'tab' => $tab, 'timeline_page' => $this->getTimelinePage($event)
+                ]));
+            }
+            catch (\Exception $exception) {
+                $this->setResponse((new CControllerResponseData(['main_block' => json_encode([
+                    'error' => ['messages' => [$exception->getMessage()]]
+                ])]))->disableView());
+            }
             return;
         }
 
@@ -104,7 +173,7 @@ class CControllerAnalistProblemPopup extends CController {
 
         $recovery_eventid = (int) ($event['r_eventid'] ?? 0);
 
-        if ($recovery_eventid > 0) {
+        if ($recovery_eventid > 0 && in_array($tab, ['overview', 'graphs'], true)) {
             $recovery_events = API::Event()->get([
                 'output' => ['eventid', 'clock'],
                 'eventids' => $recovery_eventid
@@ -119,7 +188,7 @@ class CControllerAnalistProblemPopup extends CController {
         $trigger = null;
         $actual_triggerid = $event['objectid'];
 
-        if ($actual_triggerid > 0 && in_array($tab, ['overview', 'host', 'timeline', 'graphs'], true)) {
+        if ($actual_triggerid > 0 && in_array($tab, ['overview', 'host', 'graphs'], true)) {
             $triggers = API::Trigger()->get([
                 'output' => ['triggerid', 'description', 'expression', 'comments', 'priority', 'opdata', 'manual_close',
                     'recovery_mode', 'recovery_expression', 'type', 'status'
@@ -127,13 +196,15 @@ class CControllerAnalistProblemPopup extends CController {
                 'triggerids' => $actual_triggerid,
                 'selectHosts' => ['hostid', 'host', 'name'],
                 'selectItems' => in_array($tab, ['overview', 'graphs'], true)
-                    ? ['itemid', 'hostid', 'name', 'key_'] : null,
-                'expandExpression' => true
+                    ? ['itemid'] : null,
+                'expandExpression' => $tab === 'overview'
             ]);
             $trigger = $triggers ? $triggers[0] : null;
         }
 
         $can_acknowledge = $tab === 'overview' && $this->checkAccess(CRoleHelper::ACTIONS_ACKNOWLEDGE_PROBLEMS);
+        $can_comment = in_array($tab, ['overview', 'update'], true)
+            && $this->checkAccess(CRoleHelper::ACTIONS_ADD_PROBLEM_COMMENTS);
         $can_change_severity = false;
         $editable_triggers = [];
         if ($tab === 'overview' && $trigger
@@ -163,6 +234,21 @@ class CControllerAnalistProblemPopup extends CController {
                         $closing_pending = true;
                         break;
                     }
+                }
+            }
+        }
+
+        // Overview needs only visible names and inventory notes for this trigger's hosts.
+        if ($tab === 'overview' && !empty($trigger['hosts'])) {
+            $overview_hosts = API::Host()->get([
+                'output' => ['hostid', 'name'],
+                'hostids' => array_column($trigger['hosts'], 'hostid'),
+                'selectInventory' => ['notes'],
+                'preservekeys' => true
+            ]);
+            foreach ($trigger['hosts'] as $index => $trigger_host) {
+                if (isset($overview_hosts[$trigger_host['hostid']])) {
+                    $trigger['hosts'][$index] = array_replace($trigger_host, $overview_hosts[$trigger_host['hostid']]);
                 }
             }
         }
@@ -200,21 +286,26 @@ class CControllerAnalistProblemPopup extends CController {
 
         // Get problem events for Time Patterns.
         $pattern_events = [];
+        $pattern_timeline = null;
         if ($tab === 'patterns' && $actual_triggerid > 0) {
-            // Get problem events from the last 12 months for Time Patterns/Heatmap.
-            $pattern_time_till = isset($event['clock']) ? (int)$event['clock'] : time();
-            $pattern_time_from = strtotime('-11 months', strtotime(date('Y-m-01 00:00:00', $pattern_time_till)));
+            try {
+                $pattern_timeline = $this->getPatternTimeline($event);
+            }
+            catch (\Exception $exception) {
+                $this->setResponse((new CControllerResponseData(['main_block' => json_encode([
+                    'error' => ['messages' => [$exception->getMessage()]]
+                ])]))->disableView());
+                return;
+            }
 
             $pattern_events = API::Event()->get([
                 'output'    => ['clock'],
-                'source'    => 0, // EVENT_SOURCE_TRIGGERS
-                'object'    => 0, // EVENT_OBJECT_TRIGGER
+                'source'    => EVENT_SOURCE_TRIGGERS,
+                'object'    => EVENT_OBJECT_TRIGGER,
                 'objectids' => $actual_triggerid,
-                'time_from' => $pattern_time_from,
-                'time_till' => $pattern_time_till,
-                'value'     => 1, // Only problem events
-                'sortfield' => 'clock',
-                'sortorder' => 'DESC'
+                'time_from' => $pattern_timeline['from_ts'],
+                'time_till' => $pattern_timeline['to_ts'],
+                'value'     => TRIGGER_VALUE_TRUE,
             ]);
             if ($pattern_events === false) {
                 $this->setResponse((new CControllerResponseData(['main_block' => json_encode([
@@ -235,12 +326,12 @@ class CControllerAnalistProblemPopup extends CController {
                 $unique_itemids = array_unique($trigger_itemids);
 
                 $trigger_items = API::Item()->get([
-                    'output' => ['itemid', 'name', 'key_', 'hostid', 'value_type', 'units', 'lastvalue', 'lastclock',
-                        'valuemapid'
-                    ],
+                    'output' => $tab === 'overview'
+                        ? ['itemid', 'name', 'key_', 'hostid', 'value_type', 'units', 'lastvalue', 'lastclock', 'valuemapid']
+                        : ['itemid', 'name', 'value_type'],
                     'itemids' => $unique_itemids,
                     'monitored' => true,
-                    'selectValueMap' => ['mappings']
+                    'selectValueMap' => $tab === 'overview' ? ['mappings'] : null
                 ]);
 
                 // Use itemid as key to prevent any potential duplicates.
@@ -342,11 +433,39 @@ class CControllerAnalistProblemPopup extends CController {
             ? $this->getOperationalData($trigger, $event, $trigger_items)
             : ['value' => '', 'history' => []];
 
+        $graph_timeline = null;
+        if ($tab === 'graphs') {
+            try {
+                $graph_timeline = $this->getGraphTimeline($event);
+            }
+            catch (\Exception $exception) {
+                $this->setResponse((new CControllerResponseData(['main_block' => json_encode([
+                    'error' => ['messages' => [$exception->getMessage()]]
+                ])]))->disableView());
+                return;
+            }
+        }
+
+        $timeline_page = null;
+        if ($tab === 'timeline') {
+            try {
+                $timeline_page = $this->getTimelinePage($event);
+            }
+            catch (\Exception $exception) {
+                $this->setResponse((new CControllerResponseData(['main_block' => json_encode([
+                    'error' => ['messages' => [$exception->getMessage()]]
+                ])]))->disableView());
+                return;
+            }
+        }
+
         // Prepare data for view
         $data = [
             'tab' => $tab,
+            'initial_tab' => $this->getInput('initial_tab', 'overview'),
             'is_fragment' => $this->getAction() === 'problemanalist.tab.get',
             'can_acknowledge' => $can_acknowledge,
+            'can_comment' => $can_comment,
             'can_change_severity' => $can_change_severity,
             'can_close' => $can_close,
             'closing_pending' => $closing_pending,
@@ -354,9 +473,13 @@ class CControllerAnalistProblemPopup extends CController {
             'trigger' => $trigger,
             'host' => $host,
             'pattern_events' => $pattern_events,
+            'pattern_timeline' => $pattern_timeline,
             'items' => $items,
             'monthly_comparison' => $monthly_comparison,
+            'timeline_page' => $timeline_page,
             'operational_data' => $operational_data,
+            'graph_timeline' => $graph_timeline,
+            'graph_layout' => $this->getInput('graph_layout', 'items'),
             'user' => [
                 'debug_mode' => $this->getDebugMode()
             ]
@@ -371,6 +494,92 @@ class CControllerAnalistProblemPopup extends CController {
     /**
      * Get comprehensive host data for hostcard display
      */
+    private function getTimelinePage(array $event): array {
+        $options = [
+            'output' => ['eventid', 'source', 'object', 'objectid', 'acknowledged', 'clock', 'ns', 'severity',
+                'r_eventid', 'cause_eventid'],
+            'selectAcknowledges' => ['userid', 'clock', 'message', 'action', 'old_severity', 'new_severity',
+                'suppress_until', 'taskid'],
+            'source' => EVENT_SOURCE_TRIGGERS, 'object' => EVENT_OBJECT_TRIGGER, 'value' => TRIGGER_VALUE_TRUE,
+            'objectids' => $event['objectid'], 'eventid_till' => $event['eventid'],
+            'sortfield' => ['clock', 'eventid'], 'sortorder' => ZBX_SORT_DOWN, 'limit' => 21
+        ];
+        $read = static function (array $query): array {
+            $events = API::Event()->get($query);
+            if (!is_array($events)) throw new \RuntimeException(_('Unable to load recent events.'));
+            return array_values($events);
+        };
+        if ($this->getInput('tab', 'overview') === 'timeline_events') {
+            $before_id = (string) $this->getInput('before_eventid');
+            $before_clock = (int) $this->getInput('before_clock');
+            $cursor_events = API::Event()->get([
+                'output' => ['eventid', 'source', 'object', 'objectid', 'clock', 'value'], 'eventids' => [$before_id]
+            ]);
+            $cursor = $cursor_events ? $cursor_events[0] : null;
+            if (!$cursor || (string) $cursor['objectid'] !== (string) $event['objectid']
+                    || (int) $cursor['source'] !== EVENT_SOURCE_TRIGGERS
+                    || (int) $cursor['object'] !== EVENT_OBJECT_TRIGGER || (int) $cursor['value'] !== TRIGGER_VALUE_TRUE
+                    || (int) $cursor['clock'] !== $before_clock || bccomp($before_id, (string) $event['eventid']) > 0) {
+                throw new \RuntimeException(_('Recent event not found or access denied.'));
+            }
+            // Same-second events first, then older seconds. Zabbix's BC Math scale is fractional;
+            // event IDs must remain integer strings for native API validation.
+            $events = bccomp($before_id, '1') > 0 ? $read(array_replace($options, [
+                'time_from' => $before_clock, 'time_till' => $before_clock, 'eventid_till' => bcsub($before_id, '1', 0)
+            ])) : [];
+            if (count($events) < 21 && $before_clock > 0) {
+                $events = array_merge($events, $read(array_replace($options, [
+                    'time_till' => $before_clock - 1, 'limit' => 21 - count($events)
+                ])));
+            }
+        }
+        else {
+            $events = $read($options);
+        }
+        $has_more = count($events) > 20;
+        $events = array_slice($events, 0, 20);
+        $last = $events ? $events[count($events) - 1] : null;
+        return ['events' => $events, 'has_more' => $has_more,
+            'cursor' => $last ? ['eventid' => (string) $last['eventid'], 'clock' => (int) $last['clock']] : null];
+    }
+
+    private function getRecurrenceCounts(): void {
+        try {
+            $eventids = array_values(array_unique($this->getInput('recurrence_eventids', [$this->getInput('eventid')])));
+            $events = API::Event()->get([
+                'output' => ['eventid', 'source', 'object', 'objectid', 'value'],
+                'eventids' => $eventids,
+                'source' => EVENT_SOURCE_TRIGGERS, 'object' => EVENT_OBJECT_TRIGGER, 'value' => TRIGGER_VALUE_TRUE
+            ]);
+            $events = array_values(array_filter($events ?: [], static function (array $event): bool {
+                return (int) $event['source'] === EVENT_SOURCE_TRIGGERS
+                    && (int) $event['object'] === EVENT_OBJECT_TRIGGER && (int) $event['value'] === TRIGGER_VALUE_TRUE;
+            }));
+            if (!$events) throw new \RuntimeException(_('Problem event not found or access denied.'));
+
+            $parser = new CRangeTimeParser();
+            $parser->parse('now-6M');
+            $time_from = $parser->getDateTime(true)->getTimestamp();
+            $time_till = time();
+            $counts = API::Event()->get([
+                'countOutput' => true, 'groupBy' => ['objectid'],
+                'source' => EVENT_SOURCE_TRIGGERS, 'object' => EVENT_OBJECT_TRIGGER, 'value' => TRIGGER_VALUE_TRUE,
+                'objectids' => array_values(array_unique(array_column($events, 'objectid'))),
+                'time_from' => $time_from, 'time_till' => $time_till
+            ]);
+            if (!is_array($counts)) throw new \RuntimeException(_('Unable to load recurrence counts.'));
+            $counts_by_trigger = [];
+            foreach ($counts as $count) $counts_by_trigger[$count['objectid']] = (string) $count['rowscount'];
+            $result = [];
+            foreach ($events as $event) $result[$event['eventid']] = $counts_by_trigger[$event['objectid']] ?? '0';
+            $response = ['counts' => (object) $result, 'time_from' => $time_from, 'time_till' => $time_till];
+        }
+        catch (\Exception $exception) {
+            $response = ['error' => ['messages' => [$exception->getMessage()]]];
+        }
+        $this->setResponse((new CControllerResponseData(['main_block' => json_encode($response)]))->disableView());
+    }
+
     private function getHostCardData($hostid) {
         $options = [
             'output' => ['hostid', 'name', 'status', 'maintenanceid', 'maintenance_status', 'maintenance_type',
@@ -560,6 +769,144 @@ class CControllerAnalistProblemPopup extends CController {
         return $host;
     }
 
+    private function getPatternTimeline(array $event): array {
+        $period = $this->getInput('pattern_period', '12');
+        if ($period === 'custom') {
+            $from = $this->getInput('pattern_from');
+            $to = $this->getInput('pattern_to');
+            $parser = new CRangeTimeParser();
+            if ($parser->parse($from) !== CParser::PARSE_SUCCESS) throw new \RuntimeException(_('Invalid start time.'));
+            $from_ts = $parser->getDateTime(true)->getTimestamp();
+            if ($parser->parse($to) !== CParser::PARSE_SUCCESS) throw new \RuntimeException(_('Invalid end time.'));
+            $to_ts = $parser->getDateTime(false)->getTimestamp();
+            if ($from_ts < 0 || $to_ts > ZBX_MAX_INT32 || $from_ts > $to_ts) {
+                throw new \RuntimeException(_('The end time must not precede the start time.'));
+            }
+            if ($to_ts - $from_ts + 1 > CTimePeriodHelper::getMaxPeriod()) {
+                throw new \RuntimeException(_('The selected period exceeds the maximum time period configured in Zabbix.'));
+            }
+        }
+        else {
+            // Include the selected event's month and the preceding calendar months, as before.
+            $to_ts = (int) $event['clock'];
+            $month_start = strtotime(date('Y-m-01 00:00:00', $to_ts));
+            $from_ts = max(0, strtotime('-'.((int) $period - 1).' months', $month_start));
+            $from = date(ZBX_FULL_DATE_TIME, $from_ts);
+            $to = date(ZBX_FULL_DATE_TIME, $to_ts);
+        }
+        return compact('period', 'from', 'to', 'from_ts', 'to_ts');
+    }
+
+    private function getGraphTimeline(array $event): array {
+        $period = $this->getInput('graph_period', 'around');
+        $event_clock = (int) $event['clock'];
+        $now = time();
+        switch ($period) {
+            case 'custom':
+                $from = $this->getInput('graph_from');
+                $to = $this->getInput('graph_to');
+                break;
+            case 'before':
+                $from = date(ZBX_FULL_DATE_TIME, max(0, $event_clock - 6 * SEC_PER_HOUR));
+                $to = date(ZBX_FULL_DATE_TIME, $event_clock);
+                break;
+            case 'duration':
+                $end = (int) ($event['recovery_clock'] ?? $now);
+                $from = date(ZBX_FULL_DATE_TIME, max(0, min($event_clock, $end - ZBX_MIN_PERIOD)));
+                $to = date(ZBX_FULL_DATE_TIME, $end);
+                break;
+            case 'day':
+                $from = 'now-1d';
+                $to = 'now';
+                break;
+            default:
+                $from = date(ZBX_FULL_DATE_TIME, max(0, $event_clock - SEC_PER_HOUR));
+                $to = date(ZBX_FULL_DATE_TIME, min($now, $event_clock + SEC_PER_HOUR));
+        }
+        $parser = new CRangeTimeParser();
+        if ($parser->parse($from) !== CParser::PARSE_SUCCESS) throw new \RuntimeException(_('Invalid start time.'));
+        $from_ts = $parser->getDateTime(true)->getTimestamp();
+        if ($parser->parse($to) !== CParser::PARSE_SUCCESS) throw new \RuntimeException(_('Invalid end time.'));
+        $to_ts = $parser->getDateTime(false)->getTimestamp();
+        $duration = $to_ts - $from_ts + 1;
+        if ($duration < CTimePeriodHelper::getMinPeriod()) {
+            throw new \RuntimeException(_('The selected period is too short or the end time precedes the start time.'));
+        }
+        if ($duration > CTimePeriodHelper::getMaxPeriod()) {
+            throw new \RuntimeException(_('The selected period exceeds the maximum time period configured in Zabbix.'));
+        }
+        return compact('period', 'from', 'to', 'from_ts', 'to_ts');
+    }
+
+    private function getMoreHistory(array $event): void {
+        $itemid = (string) $this->getInput('itemid');
+        $triggers = API::Trigger()->get([
+            'output' => ['triggerid'], 'triggerids' => $event['objectid'], 'selectItems' => ['itemid']
+        ]);
+        $itemids = array_map('strval', array_column($triggers[0]['items'] ?? [], 'itemid'));
+        $items = in_array($itemid, $itemids, true) ? API::Item()->get([
+            'output' => ['itemid', 'name', 'key_', 'value_type', 'units'],
+            'itemids' => [$itemid], 'monitored' => true, 'selectValueMap' => ['mappings']
+        ]) : [];
+        $item = $items ? $items[0] : null;
+        if (!$item || (int) $item['value_type'] === ITEM_VALUE_TYPE_BINARY) {
+            $this->setResponse((new CControllerResponseData(['main_block' => json_encode([
+                'error' => ['messages' => [_('Item history not found or access denied.')]]
+            ])]))->disableView());
+            return;
+        }
+
+        $clock = (int) $this->getInput('before_clock');
+        $ns = (int) $this->getInput('before_ns');
+        $older = [];
+        try {
+            $query = ['history' => (int) $item['value_type'], 'itemids' => [$itemid],
+                'sortfield' => ['clock', 'ns'], 'sortorder' => ZBX_SORT_DOWN];
+            if ($ns > 0) {
+                // The native API has no nanosecond range filter. Seek within just this second,
+                // fetching timestamps only so dense text/log history does not repeat large values.
+                $limit = 4;
+                do {
+                    $rows = API::History()->get($query + ['output' => ['ns'],
+                        'time_from' => $clock, 'time_till' => $clock, 'limit' => $limit]);
+                    if (!is_array($rows)) throw new \RuntimeException('History lookup failed');
+                    $timestamps = array_values(array_filter($rows, static function (array $row) use ($ns): bool {
+                        return (int) $row['ns'] < $ns;
+                    }));
+                    $full = count($rows) === $limit;
+                    $limit *= 2;
+                } while (count($timestamps) < 4 && $full);
+                if ($timestamps) {
+                    $older = API::History()->get($query + ['output' => ['itemid', 'clock', 'ns', 'value'],
+                        'time_from' => $clock, 'time_till' => $clock,
+                        'filter' => ['ns' => array_column(array_slice($timestamps, 0, 4), 'ns')], 'limit' => 4]);
+                    if (!is_array($older)) throw new \RuntimeException('History lookup failed');
+                }
+            }
+            // One lookahead value determines whether another page is available.
+            if ($clock > 0 && count($older) < 4) {
+                $rows = API::History()->get($query + ['output' => ['itemid', 'clock', 'ns', 'value'],
+                    'time_till' => $clock - 1, 'limit' => 4 - count($older)]);
+                if (!is_array($rows)) throw new \RuntimeException('History lookup failed');
+                $older = array_merge($older, $rows);
+            }
+        }
+        catch (\Exception $exception) {
+            $this->setResponse((new CControllerResponseData(['main_block' => json_encode([
+                'error' => ['messages' => [_('Unable to load older values. Please retry.')]]
+            ])]))->disableView());
+            return;
+        }
+
+        $values = array_slice($older, 0, 3);
+        $last = $values ? $values[count($values) - 1] : null;
+        $this->setResponse(new CControllerResponseData([
+            'tab' => 'history', 'event' => $event, 'history_item' => $item, 'history_values' => $values,
+            'history_has_more' => count($older) > 3,
+            'history_cursor' => $last ? ['clock' => (int) $last['clock'], 'ns' => (int) $last['ns']] : null
+        ]));
+    }
+
     private function getOperationalData(?array $trigger, array $event, array $trigger_items): array {
         $data = [
             'value' => '',
@@ -633,115 +980,4 @@ class CControllerAnalistProblemPopup extends CController {
         return $data;
     }
 
-    private function getSystemMetricsAtEventTime($host, $event_timestamp) {
-        $hostid = $host['hostid'];
-        $interfaces = $host['interfaces'] ?? [];
-
-        // Determine monitoring type based on main interface
-        $monitoring_type = $this->getHostMonitoringType($interfaces);
-
-        $metrics = [
-            'type' => $monitoring_type,
-            'available' => false,
-            'categories' => []
-        ];
-
-        // Only proceed if we have Zabbix Agent
-        if ($monitoring_type !== 'agent') {
-            return $metrics;
-        }
-
-        try {
-            // Get essential system metrics for Zabbix Agent (using lastvalue)
-            $metrics_list = $this->getEssentialSystemMetrics($hostid);
-            $metrics['categories'] = $metrics_list;
-
-            $metrics['available'] = !empty($metrics_list);
-
-        } catch (Exception $e) {
-            error_log('Error getting system metrics: ' . $e->getMessage());
-        }
-
-        return $metrics;
-    }
-
-    /**
-     * Determine monitoring type based on host interfaces
-     */
-    private function getHostMonitoringType($interfaces) {
-        if (empty($interfaces)) {
-            return 'unknown';
-        }
-
-        // Find main interface
-        foreach ($interfaces as $interface) {
-            if ($interface['main'] == 1) {
-                switch ($interface['type']) {
-                    case 1: return 'agent';    // Zabbix Agent
-                    case 2: return 'snmp';     // SNMP
-                    case 3: return 'ipmi';     // IPMI
-                    case 4: return 'jmx';      // JMX
-                    default: return 'unknown';
-                }
-            }
-        }
-
-        return 'unknown';
-    }
-
-    /**
-     * Get essential system metrics for Zabbix Agent: CPU, Memory, Load, Disk /
-     */
-    private function getEssentialSystemMetrics($hostid) {
-        $metrics = [];
-
-        // Define flexible patterns for different Zabbix versions
-        $metric_patterns = [
-            //'CPU' => ['system.cpu.util', 'system.cpu.utilization'],
-            //'Memory' => ['vm.memory.util', 'vm.memory.size[available]', 'vm.memory.size[total]'],
-            //'Load' => ['system.cpu.load[percpu,avg1]', 'system.cpu.load[,avg5]', 'system.cpu.load'],
-            'Uptime' => ['system.uptime', 'system.hw.uptime[hrSystemUptime.0]'],
-            'Os' => ['vfs.file.contents[/etc/os-release]', 'system.sw.os'],
-            '/data' => ['vfs.fs.dependent.size[/data,pused]'],
-            '/' => ['vfs.fs.dependent.size[/,pused]']
-        ];
-
-        // Search for each category using multiple patterns
-        foreach ($metric_patterns as $category => $patterns) {
-            $found_item = null;
-
-            foreach ($patterns as $pattern) {
-                $items = API::Item()->get([
-                    'output' => ['itemid', 'name', 'key_', 'units', 'lastvalue', 'lastclock'],
-                    'hostids' => $hostid,
-                    'search' => ['key_' => $pattern],
-                    'monitored' => true,
-                    'filter' => [
-                        'value_type' => [ITEM_VALUE_TYPE_FLOAT, ITEM_VALUE_TYPE_UINT64]
-                    ],
-                    'limit' => 1
-                ]);
-
-                if (!empty($items)) {
-                    $found_item = $items[0];
-                    break; // Use first matching pattern
-                }
-            }
-
-            if ($found_item) {
-                // Simply get the last value from the item
-                $metric_data = [
-                    'name' => $found_item['name'],
-                    'key' => $found_item['key_'],
-                    'units' => $found_item['units'] ?? '',
-                    'category' => $category,
-                    'last_value' => $found_item['lastvalue'] ?? 'N/A'
-                ];
-
-                $metrics[] = $metric_data;
-            }
-        }
-
-        return $metrics;
-    }
 }
