@@ -43,6 +43,8 @@ export async function runRegression(fixture, asset, popupAsset, fragments = {}, 
         assert(!fragments.graphs.response.body.includes('name="graph_layout"'),
             'A single graphable item has no Display dropdown');
         assert(fragments.graphs.response.body.includes('data-graph-custom-range="" hidden="hidden"'));
+        assert(fragments.graphs.response.body.match(/<button[^>]*data-graph-apply=""[^>]*>/)?.[0].includes('hidden="hidden"'),
+            'The initial preset period hides Apply');
         const ids = [...fragments.graphs.response.body.matchAll(/\bid="([^"]+)"/g)].map(match => match[1]);
         assert.equal(ids.length, new Set(ids).size, 'Graph controls and calendars have unique IDs');
     }
@@ -100,6 +102,8 @@ export async function runRegression(fixture, asset, popupAsset, fragments = {}, 
     }
     if (actionFixtures['graphs-custom']) {
         assert(!actionFixtures['graphs-custom'].response.body.includes('data-graph-custom-range="" hidden="hidden"'));
+        assert(!actionFixtures['graphs-custom'].response.body.match(/<button[^>]*data-graph-apply=""[^>]*>/)?.[0].includes('hidden="hidden"'),
+            'Custom period renders Apply visible');
     }
     if (actionFixtures['history-preview']) {
         const body = actionFixtures['history-preview'].response.body;
@@ -793,11 +797,12 @@ export async function runRegression(fixture, asset, popupAsset, fragments = {}, 
     pending[index].resolve({body: graphBody}); await loading;
     const graphForm = new Panel(''); graphForm.popupRoot = graphRoot;
     graphForm.matches = selector => selector === '[data-graph-controls]';
-    const periodInput = {value: 'before', matches: () => true, closest: () => graphForm};
+    const periodInput = {value: 'before', disabled: false,
+        matches: selector => selector.includes('[data-graph-period]'), closest: () => graphForm};
     const customRange = {hidden: true};
     const fromInput = {value: 'now-6h'};
     const toInput = {value: 'now'};
-    const graphSubmit = {disabled: false};
+    const graphSubmit = {disabled: false, hidden: true};
     const graphMessage = {textContent: ''};
     const graphFields = {
         '[name="graph_period"]': periodInput,
@@ -805,13 +810,56 @@ export async function runRegression(fixture, asset, popupAsset, fragments = {}, 
         '[data-graph-to] input': toInput, '[type="submit"]': graphSubmit, '[data-graph-message]': graphMessage
     };
     graphForm.querySelector = selector => graphFields[selector];
+    index = pending.length;
     periodInput.value = 'custom';
     graphRoot.dispatch('change', {target: periodInput});
     assert(!customRange.hidden, 'Custom period reveals the native date fields');
-    periodInput.value = 'before';
-    graphRoot.dispatch('change', {target: periodInput});
-    assert(customRange.hidden, 'Preset periods hide custom date fields');
+    assert(!graphSubmit.hidden, 'Custom period reveals Apply');
+    assert.equal(pending.length, index, 'Selecting Custom waits for an explicit Apply');
+    for (const preset of ['before', 'around', 'duration', 'day']) {
+        index = pending.length;
+        periodInput.value = preset;
+        graphRoot.dispatch('change', {target: periodInput});
+        const applied = graphPopup.graphRequest;
+        assert(customRange.hidden, 'Preset periods hide custom date fields');
+        assert(graphSubmit.hidden, 'Preset periods hide Apply');
+        assert(applied && pending.length === index + 1, 'Selecting a preset immediately reloads the graphs');
+        assert.equal(pending[index].options.body.get('graph_period'), preset);
+        assert.equal(pending[index].options.body.get('graph_from'), null);
+        assert(periodInput.disabled && graphSubmit.disabled && !graphRoot.cancelButton.disabled,
+            'A pending graph update prevents conflicting selections while Cancel stays available');
+        pending[index].resolve({body: graphBody}); await applied;
+        assert(!periodInput.disabled && !graphSubmit.disabled);
+        assert.equal(graphPopup.graphOptions.graph_period, preset);
+    }
+    const layoutInput = {value: 'items', disabled: false,
+        matches: selector => selector.includes('[data-graph-layout]'), closest: () => graphForm};
+    graphFields['[name="graph_layout"]'] = layoutInput;
+    for (const layout of ['combined', 'items']) {
+        index = pending.length;
+        layoutInput.value = layout;
+        graphRoot.dispatch('change', {target: layoutInput});
+        const applied = graphPopup.graphRequest;
+        assert(applied && pending.length === index + 1, 'Changing Display immediately reloads the graphs');
+        assert.equal(pending[index].options.body.get('graph_layout'), layout);
+        assert.equal(pending[index].options.body.get('graph_period'), 'day');
+        assert(graphSubmit.hidden && layoutInput.disabled && periodInput.disabled);
+        pending[index].resolve({body: graphBody}); await applied;
+        assert(!layoutInput.disabled && !periodInput.disabled);
+    }
     periodInput.value = 'custom';
+    index = pending.length;
+    graphRoot.dispatch('change', {target: periodInput});
+    assert(!customRange.hidden && pending.length === index, 'Returning to Custom reveals dates without loading');
+    assert(!graphSubmit.hidden);
+    layoutInput.value = 'combined';
+    graphRoot.dispatch('change', {target: layoutInput});
+    const customDisplay = graphPopup.graphRequest;
+    assert(customDisplay && !graphSubmit.hidden, 'Changing Display in Custom period applies the current dates');
+    assert.equal(pending[index].options.body.get('graph_layout'), 'combined');
+    assert.equal(pending[index].options.body.get('graph_from'), 'now-6h');
+    assert.equal(pending[index].options.body.get('graph_to'), 'now');
+    pending[index].resolve({body: graphBody}); await customDisplay;
     index = pending.length;
     let prevented = false, stopped = false;
     graphRoot.dispatch('submit', {target: graphForm, preventDefault() { prevented = true; }, stopPropagation() { stopped = true; }});
@@ -824,7 +872,7 @@ export async function runRegression(fixture, asset, popupAsset, fragments = {}, 
     pending[index].resolve({error: {messages: ['Invalid graph period']}}); await graphLoading;
     assert.equal(graphMessage.textContent, 'Invalid graph period');
     assert.equal(graphPopup.panels.get('graphs').innerHTML, graphBody, 'Invalid periods retain the existing graphs and form');
-    assert(!graphSubmit.disabled && fromInput.value === 'now-6h');
+    assert(!graphSubmit.disabled && !periodInput.disabled && fromInput.value === 'now-6h');
     index = pending.length;
     graphLoading = graphPopup.updateGraphs(graphForm);
     await graphPopup.activateTab('overview');

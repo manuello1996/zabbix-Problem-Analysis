@@ -873,12 +873,16 @@ if ($active_tab === 'graphs') {
     if ($has_multiple_items) {
         $layout = (new CSelect('graph_layout'))->setId($graph_id.'-layout')
             ->setFocusableElementId($graph_id.'-layout-focus')->setValue($graph_layout)
+            ->setAttribute('data-graph-layout', '')
             ->addOptions(CSelect::createOptionsFromArray([
                 'items' => _('Individual graphs'), 'combined' => _('Combined graph')
             ]));
         $graph_toolbar->addItem([new CLabel(_('Display'), $layout->getFocusableElementId()), $layout]);
     }
-    $graph_toolbar->addItem((new CSubmit('apply_graphs', _('Apply')))->setId($graph_id.'-apply'));
+    $apply_graphs = (new CSubmit('apply_graphs', _('Apply')))->setId($graph_id.'-apply')
+        ->setAttribute('data-graph-apply', '');
+    if ($timeline['period'] !== 'custom') $apply_graphs->setAttribute('hidden', 'hidden');
+    $graph_toolbar->addItem($apply_graphs);
     $custom_range = (new CDiv([
         new CLabel(_('From'), $graph_id.'_from'),
         (new CDateSelector($graph_id.'_from', $timeline['from']))->setDateFormat(ZBX_FULL_DATE_TIME)
@@ -929,8 +933,8 @@ if ($active_tab === 'graphs') {
             ->setHeader([
                 new CTag('h4', true, $group['title']),
                 (new CDiv([
-                    (new CLink(_('Open interactive graph'), $graph_url))->setTarget('_blank'),
-                    (new CLink(_('Values'), $values_url))->setTarget('_blank')
+                    (new CLink(_('Open interactive graph'), $graph_url))->setTarget('_blank')->addClass(ZBX_STYLE_BTN_ALT),
+                    (new CLink(_('Values'), $values_url))->setTarget('_blank')->addClass(ZBX_STYLE_BTN_ALT)
                 ]))->addClass('analist-graph-links')
             ])->setExpanded(true));
     }

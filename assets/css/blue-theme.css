@@ -1206,7 +1206,8 @@ td:has(.js-lts-button-widget) {
 .event-details-popup .analist-graph-custom-range:not([hidden]) {
     margin-top: 12px;
 }
-.event-details-popup [data-graph-custom-range][hidden] {
+.event-details-popup [data-graph-custom-range][hidden],
+.event-details-popup [data-graph-apply][hidden] {
     display: none;
 }
 .event-details-popup [data-graph-message] {
@@ -1218,11 +1219,47 @@ td:has(.js-lts-button-widget) {
 .event-details-popup .analist-graphs > section {
     margin-top: 16px;
 }
+.event-details-popup .analist-graphs > section > .section-head {
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 8px;
+    height: auto;
+    min-height: 36px;
+    padding: 4px 8px;
+    box-sizing: border-box;
+}
 .event-details-popup .analist-graphs .section-head h4 {
+    flex: 1 1 240px;
+    min-width: 0;
     margin: 0;
+    padding: 0;
+    line-height: 24px;
+    white-space: normal;
+    overflow-wrap: anywhere;
 }
 .event-details-popup .analist-graph-links {
+    flex: 0 0 auto;
+    flex-wrap: nowrap;
+    gap: 8px;
     margin-left: auto;
+}
+.event-details-popup .analist-graph-links a {
+    display: inline-flex;
+    align-items: center;
+    box-sizing: border-box;
+    white-space: nowrap;
+    text-decoration: none;
+}
+.event-details-popup .analist-graphs .section-head .section-toggle {
+    display: inline-flex;
+    flex: 0 0 28px;
+    align-items: center;
+    justify-content: center;
+    width: 28px;
+    height: 28px;
+    max-height: none;
+    padding: 0;
+    margin: 0;
 }
 .event-details-popup .analist-graphs .chart-image {
     display: block;

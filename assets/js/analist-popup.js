@@ -715,10 +715,15 @@
                 if (event.target.matches('[data-services-search]')) this.serviceUi.filterServices(event.target.value);
             }, {signal: this.lifecycle.signal});
             root.addEventListener('change', event => {
-                if (!event.target.matches('[data-graph-period]')) return;
-                const range = event.target.closest('[data-graph-controls]')?.querySelector('[data-graph-custom-range]');
-                if (range) range.hidden = event.target.value !== 'custom';
+                if (!event.target.matches('[data-graph-period], [data-graph-layout]')) return;
+                const form = event.target.closest('[data-graph-controls]');
+                if (!form) return;
+                const custom = form.querySelector('[name="graph_period"]').value === 'custom';
+                const range = form.querySelector('[data-graph-custom-range]');
+                if (range) range.hidden = !custom;
+                form.querySelector('[type="submit"]').hidden = !custom;
                 this.scheduleLayout();
+                if (!custom || event.target.matches('[data-graph-layout]')) this.updateGraphs(form);
             }, {signal: this.lifecycle.signal});
             root.addEventListener('submit', event => {
                 if (!event.target.matches('[data-graph-controls]')) return;
@@ -1024,8 +1029,12 @@
             const state = this.tabs.get('graphs');
             const submit = form.querySelector('[type="submit"]');
             const message = form.querySelector('[data-graph-message]');
+            const selects = [form.querySelector('[name="graph_period"]'), form.querySelector('[name="graph_layout"]')]
+                .filter(Boolean);
+            const disabledStates = selects.map(select => select.disabled);
             message.textContent = '';
             submit.disabled = true;
+            selects.forEach(select => { select.disabled = true; });
             form.setAttribute('aria-busy', 'true');
             const request = this.fetchJson('problemanalist.tab.get', {
                 eventid: this.config.eventData.eventid, tab: 'graphs', ...options,
@@ -1043,6 +1052,7 @@
                 if (this.graphRequest === request) this.graphRequest = null;
                 if (!this.closed && version === this.dataVersion && this.root.contains(form)) {
                     submit.disabled = false;
+                    selects.forEach((select, index) => { select.disabled = disabledStates[index]; });
                     form.removeAttribute('aria-busy');
                     this.scheduleLayout();
                 }
