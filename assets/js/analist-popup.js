@@ -740,7 +740,8 @@
             message.textContent = '';
             const request = this.fetchJson('problemanalist.tab.get', {
                 eventid: this.config.eventData.eventid, tab: 'timeline_events',
-                before_eventid: button.dataset.beforeEventid, before_clock: button.dataset.beforeClock
+                before_eventid: button.dataset.beforeEventid, before_clock: button.dataset.beforeClock,
+                ...(button.dataset.beforeGroup ? {before_group: button.dataset.beforeGroup} : {})
             }).then(result => {
                 if (this.closed || version !== this.dataVersion || !this.root.contains(section)) return;
                 if (typeof result.body !== 'string' || typeof result.has_more !== 'boolean'
@@ -749,6 +750,7 @@
                 if (result.cursor) {
                     button.dataset.beforeEventid = result.cursor.eventid;
                     button.dataset.beforeClock = result.cursor.clock;
+                    button.dataset.beforeGroup = result.cursor.group;
                 }
                 button.hidden = !result.has_more;
                 if (!result.has_more) message.textContent = this.config.noMoreEventsLabel;

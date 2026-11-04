@@ -222,6 +222,43 @@ export async function runRegression(fixture, asset, popupAsset, fragments = {}, 
             assert.equal(rendered.response.comment_actions.csrfToken, 'fixture-csrf-acknowledge');
         }
     }
+    if (actionFixtures['info-correlation']) {
+        for (const scenario of ['info-correlation', 'info-correlation-inaccessible', 'info-manual',
+            'info-user-inaccessible', 'info-suppressed', 'info-maintenance', 'info-maintenance-inaccessible',
+            'info-pending-suppression', 'info-unsuppressed', 'info-both']) {
+            const body = actionFixtures[scenario].response.body;
+            assert(body.includes('data-problem-info=""') && body.includes('data-hintbox-contents="'),
+                'Problem information uses native hover hints');
+            assert(body.indexOf('data-problem-info=') < body.indexOf('<h4>Actions</h4>'),
+                'Problem information appears before the Update action table');
+            assert(!body.includes('<errors>') && !body.includes('<one>') && !body.includes('<maintenance>'),
+                'Rule, user and maintenance names must remain escaped');
+            const section = body.match(/<section\b[^>]*data-problem-info=""[\s\S]*?<\/section>/)?.[0];
+            assert(section?.includes('<h4>Info</h4>') && section.includes('class="list-table"'),
+                'Info uses the same native section and table presentation as Actions');
+            assert(!section.match(/^<section[^>]*\bclass="[^"]*collapsed/), 'Info starts expanded');
+            const visibleText = section.replace(/<[^>]*>/g, '');
+            assert(visibleText.includes(scenario.includes('correlation') || scenario === 'info-both'
+                ? 'Resolved by event correlation rule' : scenario.includes('manual') || scenario.includes('user-inaccessible')
+                    ? 'Resolved by' : scenario.includes('unsuppressed') ? 'Unsuppressed by:' : 'Suppressed till:'),
+                'Information details are visible table text without opening a hint');
+            const ids = [...body.matchAll(/<section\b[^>]*\bid="([^"]+)"/g)].map(match => match[1]);
+            assert(ids.length === 2 && new Set(ids).size === 2, 'Info and Actions have independent collapse controls');
+        }
+        const body = scenario => actionFixtures[scenario].response.body;
+        assert(body('info-correlation').includes('Deduplicate') && body('info-correlation').includes('Resolved by event correlation rule'));
+        assert(body('info-correlation-inaccessible').includes('Resolved by event correlation rule.')
+            && !body('info-correlation-inaccessible').includes('Deduplicate'));
+        assert(body('info-manual').includes('Resolved by user') && body('info-manual').includes('operator'));
+        assert(body('info-user-inaccessible').includes('Resolved by inaccessible user.'));
+        assert(body('info-suppressed').includes('Suppressed till: Indefinitely') && body('info-suppressed').includes('Manually by:'));
+        assert(body('info-maintenance').includes('Maintenance: Night'));
+        assert(body('info-maintenance-inaccessible').includes('Inaccessible maintenance'));
+        assert(body('info-pending-suppression').includes('js-blink') && body('info-pending-suppression').includes('Suppressed till:'));
+        assert(body('info-unsuppressed').includes('Unsuppressed by:') && !body('info-unsuppressed').includes('Manually by:'));
+        assert(body('info-both').includes('Resolved by event correlation rule') && body('info-both').includes('Maintenance:'));
+        assert(!fragments.update.response.body.includes('data-problem-info='), 'Events without information have no empty Info block');
+    }
     new vm.Script(popupAsset);
     const exportsSource = popupAsset.replace('return {displayServicesTree, displayNoServicesMessage, selectService, filterServices};',
         'return {displayServicesTree, displayNoServicesMessage, selectService, filterServices, createServiceCard, createHierarchyPath, createServiceSlaInfo, getServiceStatusText, getServiceStatusClass};')
@@ -830,7 +867,7 @@ export async function runRegression(fixture, asset, popupAsset, fragments = {}, 
     const eventsMessage = {textContent: ''};
     eventsSection.querySelector = selector => selector === '[data-timeline-table] tbody' ? eventRows : eventsMessage;
     const eventsMore = new Panel(''); eventsMore.popupRoot = eventsRoot;
-    eventsMore.dataset = {beforeEventid: '81', beforeClock: '100'};
+    eventsMore.dataset = {beforeEventid: '81', beforeClock: '100', beforeGroup: 'problem'};
     eventsMore.hasAttribute = name => name === 'data-timeline-more';
     eventsMore.closest = selector => selector === '[data-timeline-events]' ? eventsSection : eventsMore;
     index = pending.length;
@@ -841,18 +878,21 @@ export async function runRegression(fixture, asset, popupAsset, fragments = {}, 
     assert.equal(pending[index].options.body.get('tab'), 'timeline_events');
     assert.equal(pending[index].options.body.get('before_eventid'), '81');
     assert.equal(pending[index].options.body.get('before_clock'), '100');
+    assert.equal(pending[index].options.body.get('before_group'), 'problem');
     assert(eventsMore.disabled && !eventsRoot.cancelButton.disabled);
     await eventsPopup.activateTab('overview');
     const moreEventsBody = actionFixtures['timeline-more-page']?.response.body || '<tr data-timeline-event="80"></tr>';
-    pending[index].resolve({body: moreEventsBody, has_more: true, cursor: {eventid: '61', clock: 80}}); await moreEvents;
+    pending[index].resolve({body: moreEventsBody, has_more: true, cursor: {eventid: '61', clock: 80, group: 'other'}}); await moreEvents;
     assert.equal(eventsPopup.activeTab, 'overview', 'Late event pages preserve the selected tab');
     assert.equal(eventRows.innerHTML, initialRows + moreEventsBody, 'More appends rows without replacing previous events');
     if (actionFixtures['timeline-page']) assert.equal((eventRows.innerHTML.match(/data-timeline-event="/g) || []).length, 40);
     assert.equal(eventsMore.dataset.beforeEventid, '61');
+    assert.equal(eventsMore.dataset.beforeGroup, 'other');
     assert(!eventsMore.disabled && !eventsMore.hidden);
     await eventsPopup.activateTab('timeline');
     index = pending.length;
     moreEvents = eventsPopup.loadMoreEvents(eventsMore);
+    assert.equal(pending[index].options.body.get('before_group'), 'other', 'More continues in the group supplied by the server');
     pending[index].resolve({error: {messages: ['Unable to load recent events']}}); await moreEvents;
     assert.equal(eventsMessage.textContent, 'Unable to load recent events');
     assert(!eventsMore.disabled && eventRows.innerHTML === initialRows + moreEventsBody,
@@ -1093,7 +1133,7 @@ export async function runRegression(fixture, asset, popupAsset, fragments = {}, 
         const header = new Element('tr');
         header.appendChild(new Element('th')); header.appendChild(new Element('th'));
         const problem = new Element('tr');
-        problem.problemData = {eventid: '1', triggerid: '7', hostid: '11'};
+        problem.problemData = {eventid: '1', triggerid: '7', hostid: '11', problemName: 'Error Notification - ID 1001'};
         problem.appendChild(new Element('td')); problem.appendChild(new Element('td'));
         const separator = new Element('tr'); const span = new Element('td'); span.colSpan = 2; separator.appendChild(span);
         const table = {header, problem, separator, bodyRows: [problem, separator],
@@ -1156,20 +1196,21 @@ export async function runRegression(fixture, asset, popupAsset, fragments = {}, 
     controller.decorateProblemTable(empty, true);
     assert.equal(empty.header.cells.length, 2, 'Empty widgets must not gain a stray header');
 
-    function extraProblem(eventid, triggerid) {
+    function extraProblem(eventid, triggerid, problemName = 'Error Notification - ID 1001') {
         const row = new Element('tr');
-        row.problemData = {eventid, triggerid, hostid: '11'};
+        row.problemData = {eventid, triggerid, hostid: '11', problemName};
         row.appendChild(new Element('td')); row.appendChild(new Element('td'));
         table.bodyRows.push(row); return row;
     }
     const repeated = extraProblem('3', '7');
     const another = extraProblem('4', '8');
     const offscreen = extraProblem('5', '9');
+    const otherName = extraProblem('8', '7', 'Error Notification - ID 10010');
     controller.decorateProblemTable(table, true);
     assert.equal(recurrenceRequests.length, 0, 'Decorating the table must not fetch counts before cells become visible');
     const recurrenceCell = row => row.querySelector('.analist-recurrences-cell');
     assert(viewport.targets.has(recurrenceCell(offscreen)));
-    viewport.callback([table.problem, repeated, another].map(row => ({target: recurrenceCell(row), isIntersecting: true})));
+    viewport.callback([table.problem, repeated, another, otherName].map(row => ({target: recurrenceCell(row), isIntersecting: true})));
     assert.equal(scheduled.size, 1, 'Visible rows share a single deferred count batch');
     const runBatchTimer = () => {
         const callbacks = [...scheduled.values()]; scheduled.clear(); callbacks.forEach(callback => callback());
@@ -1181,12 +1222,14 @@ export async function runRegression(fixture, asset, popupAsset, fragments = {}, 
     runBatchTimer();
     assert.equal(recurrenceRequests.length, 1);
     assert.equal(recurrenceRequests[0].options.body.get('tab'), 'recurrences');
-    assert.deepEqual([...recurrenceRequests[0].options.body.getAll('recurrence_eventids[]')], ['1', '4'],
-        'Rows sharing a trigger use one representative event in the batch');
-    recurrenceRequests[0].resolve({counts: {'1': '12', '4': '0'}}); await finishBatch();
+    assert.deepEqual([...recurrenceRequests[0].options.body.getAll('recurrence_eventids[]')], ['1', '4', '8'],
+        'Only rows sharing both a trigger and the resolved event name use one representative event');
+    recurrenceRequests[0].resolve({counts: {'1': '12', '4': '0', '8': '3'}}); await finishBatch();
     assert.equal(recurrenceCell(table.problem).analistRecurrences.button.textContent, '12');
     assert.equal(recurrenceCell(repeated).analistRecurrences.button.textContent, '12');
     assert.equal(recurrenceCell(another).analistRecurrences.button.textContent, '0', 'Zero is a valid count');
+    assert.equal(recurrenceCell(otherName).analistRecurrences.button.textContent, '3',
+        'Names with a shared ID prefix do not reuse another name\'s cached count');
     assert.equal(recurrenceCell(offscreen).analistRecurrences.button.textContent, '…');
     const click = {preventDefault() {}, stopPropagation() {}};
     recurrenceCell(repeated).analistRecurrences.button.dispatch('click', click);
@@ -1224,7 +1267,7 @@ export async function runRegression(fixture, asset, popupAsset, fragments = {}, 
     controller.pruneRecurrences();
     viewport.callback([{target: detachedCell, isIntersecting: true}]);
     assert.equal(scheduled.size, 0, 'Late viewport notifications must not fetch detached rows');
-    assert(!controller.recurrenceGroups.has('trigger:10'));
+    assert(!controller.recurrenceGroups.has(JSON.stringify(['10', detached.problemData.problemName])));
     const waiting = extraProblem('7', '11'); controller.decorateProblemTable(table, true);
     viewport.callback([{target: recurrenceCell(waiting), isIntersecting: true}]); runBatchTimer();
     const lastCountRequest = recurrenceRequests.at(-1);
@@ -1250,6 +1293,11 @@ if (typeof process !== 'undefined' && process.argv[1] && path.resolve(process.ar
         .map(scenario => [scenario, render('overview', scenario)]));
     for (const scenario of ['permitted', 'readonly', 'comment-only']) {
         actionFixtures['update-' + scenario] = render('update', scenario);
+    }
+    for (const scenario of ['info-correlation', 'info-correlation-inaccessible', 'info-manual', 'info-user-inaccessible',
+        'info-suppressed', 'info-maintenance', 'info-maintenance-inaccessible', 'info-pending-suppression',
+        'info-unsuppressed', 'info-both']) {
+        actionFixtures[scenario] = render('update', scenario);
     }
     actionFixtures['history-preview'] = render('overview', 'history-preview');
     actionFixtures['history-fragment'] = render('history');

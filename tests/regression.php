@@ -61,6 +61,7 @@ class ApiFixture {
                         return (string) $event['objectid'] === (string) $options['objectids']
                             && (int) $event['source'] === $options['source'] && (int) $event['object'] === $options['object']
                             && (int) $event['value'] === $options['value']
+                            && (!isset($options['filter']['name']) || $event['name'] === $options['filter']['name'])
                             && bccomp((string) $event['eventid'], (string) $options['eventid_till']) <= 0
                             && (!isset($options['time_from']) || $event['clock'] >= $options['time_from'])
                             && (!isset($options['time_till']) || $event['clock'] <= $options['time_till']);
@@ -71,19 +72,27 @@ class ApiFixture {
                     return array_slice($events, 0, $options['limit']);
                 }
                 if (is_array(API::$timeline_events) && isset($options['eventids'])) {
-                    return array_values(array_filter(API::$timeline_events, static function ($event) use ($options) {
+                    $events = array_values(array_filter(API::$timeline_events, static function ($event) use ($options) {
                         return in_array((string) $event['eventid'], array_map('strval', (array) $options['eventids']), true);
                     }));
+                    return !empty($options['preservekeys']) ? array_column($events, null, 'eventid') : $events;
                 }
-                if (!empty($options['countOutput'])) return API::$recurrence_counts;
+                if (!empty($options['countOutput'])) {
+                    return API::$recurrence_counts[$options['filter']['name']] ?? API::$recurrence_counts;
+                }
                 if (isset($options['eventids']) && API::$recurrence_events !== null) {
                     return array_values(array_filter(API::$recurrence_events, static function ($event) use ($options) {
                         return in_array($event['eventid'], (array) $options['eventids']);
                     }));
                 }
-                if (!isset($options['eventids'])) return API::$history;
+                if (!isset($options['eventids'])) {
+                    if (API::$history === false) return false;
+                    return array_values(array_filter(API::$history, static function ($event) use ($options) {
+                        return !isset($options['filter']['name']) || $event['name'] === $options['filter']['name'];
+                    }));
+                }
                 if (in_array('2', array_map('strval', (array) $options['eventids']), true)) {
-                    return [['eventid' => '2', 'clock' => 220]];
+                    return [API::$recovery];
                 }
                 $event = API::$event;
                 if (!$event) return [];
@@ -94,6 +103,14 @@ class ApiFixture {
                 }
                 if (!isset($options['selectAcknowledges'])) unset($event['acknowledges']);
                 return [$event];
+            case 'problem':
+                if (API::$timeline_events === false) return false;
+                return array_values(array_filter(API::$timeline_events ?? [], static function ($event) use ($options) {
+                    return (string) $event['r_eventid'] === '0'
+                        && (string) $event['objectid'] === (string) $options['objectids']
+                        && $event['name'] === $options['filter']['name']
+                        && bccomp($event['eventid'], (string) $options['eventid_till']) <= 0;
+                }));
             case 'trigger': return API::$trigger && (empty($options['editable']) || API::$editable) ? [API::$trigger] : [];
             case 'item': return array_values(array_filter(API::$items, static function ($item) use ($options) {
                 return in_array((string) $item['itemid'], array_map('strval', $options['itemids']), true);
@@ -143,6 +160,7 @@ class ApiFixture {
 }
 class API {
     public static $event = [];
+    public static $recovery = ['eventid' => '2', 'clock' => 220, 'correlationid' => '0', 'userid' => '0'];
     public static $timeline_events = null;
     public static $recurrence_events = null;
     public static $recurrence_counts = [];
@@ -157,6 +175,7 @@ class API {
     public static $slas = [];
     public static $sli = [];
     public static function Event() { return new ApiFixture('event'); }
+    public static function Problem() { return new ApiFixture('problem'); }
     public static function Trigger() { return new ApiFixture('trigger'); }
     public static function Host() { return new ApiFixture('host'); }
     public static function Item() { return new ApiFixture('item'); }
@@ -287,8 +306,9 @@ $controller = new ProblemControllerFixture(['eventid' => '999', 'triggerid' => '
 $controller->run();
 check(isset(json_decode($controller->response->getData()['main_block'], true)['error']), 'Missing events must not be fabricated');
 
-// Recurrences count only readable problem events and group the count by the server-resolved trigger.
-$recurrence_base = ['source' => EVENT_SOURCE_TRIGGERS, 'object' => EVENT_OBJECT_TRIGGER, 'value' => TRIGGER_VALUE_TRUE];
+// Recurrences count only readable problem events sharing a trigger and stored event name.
+$recurrence_base = ['source' => EVENT_SOURCE_TRIGGERS, 'object' => EVENT_OBJECT_TRIGGER,
+    'value' => TRIGGER_VALUE_TRUE, 'name' => 'Error Notification - ID 1001'];
 API::$recurrence_events = [
     $recurrence_base + ['eventid' => '1', 'objectid' => '7'],
     $recurrence_base + ['eventid' => '3', 'objectid' => '7'],
@@ -303,16 +323,29 @@ $recurrences = new ProblemControllerFixture($recurrence_request);
 $recurrences->run();
 $counts = json_decode($recurrences->response->getData()['main_block'], true);
 check($counts['counts'] === ['1' => '12', '3' => '12', '4' => '0'],
-    'Rows for the same trigger share a count; inaccessible or recovery events do not get fabricated counts');
+    'Rows sharing a trigger and event name share a count; inaccessible or recovery events do not get fabricated counts');
 check(count(API::$calls) === 2 && API::$calls[1][1]['objectids'] === ['7', '8'],
     'Recurrences use one grouped count query without trigger, host or history enrichment');
 $count_query = API::$calls[1][1];
 check($count_query['countOutput'] && $count_query['groupBy'] === ['objectid']
     && $count_query['value'] === TRIGGER_VALUE_TRUE && !isset($count_query['limit']),
     'Count all matching problem occurrences rather than recovery events or a limited page');
+check($count_query['filter'] === ['name' => 'Error Notification - ID 1001'],
+    'Counts use exact stored names rather than a trigger description, search or macro re-expansion');
 check($counts['time_till'] - $counts['time_from'] > 150 * SEC_PER_DAY
     && $counts['time_till'] - $counts['time_from'] < 187 * SEC_PER_DAY,
     'Recurrences use a rolling six-calendar-month window ending now');
+API::$recurrence_events[] = array_replace($recurrence_base,
+    ['eventid' => '5', 'objectid' => '7', 'name' => 'Error Notification - ID 10010']);
+API::$recurrence_counts = ['Error Notification - ID 1001' => [['objectid' => '7', 'rowscount' => '12']],
+    'Error Notification - ID 10010' => [['objectid' => '7', 'rowscount' => '3']]];
+$recurrence_request['recurrence_eventids'][] = '5';
+$recurrences = new ProblemControllerFixture($recurrence_request);
+API::$calls = [];
+$recurrences->run();
+$counts = json_decode($recurrences->response->getData()['main_block'], true);
+check($counts['counts'] === ['1' => '12', '3' => '12', '4' => '0', '5' => '3'] && count(API::$calls) === 3,
+    'Different macro-expanded names on the same trigger never share counts; same-name triggers stay batched');
 API::$recurrence_counts = false;
 $recurrences->run();
 check(isset(json_decode($recurrences->response->getData()['main_block'], true)['error']),
@@ -337,6 +370,7 @@ $controller->run();
 $data = $controller->response->getData();
 check(!isset($data['event']['acknowledges']), 'Overview must skip acknowledgement history');
 check(count(API::$calls) === 2, 'Overview skips writable permission queries when the trigger is unavailable');
+check(API::$calls[0][1]['selectSuppressionData'] === null, 'Suppression enrichment is lazy and belongs only to Update');
 $trigger_calls = array_values(array_filter(API::$calls, static function ($call) { return $call[0] === 'trigger'; }));
 check($trigger_calls[0][1]['triggerids'] === '7', 'Event trigger must override a conflicting request hint');
 check($data['host'] === null, 'An unrelated requested host must not be loaded');
@@ -346,6 +380,19 @@ $update->run();
 $data = $update->response->getData();
 check($data['event']['acknowledges'][0] === $ack, 'Update must request complete acknowledgements');
 check(count(API::$calls) === 1, 'Update must skip trigger, host and range queries');
+check(API::$calls[0][1]['selectSuppressionData'] === ['maintenanceid', 'userid', 'suppress_until'],
+    'Update requests native suppression details');
+API::$event['r_eventid'] = '2';
+API::$recovery['correlationid'] = '91';
+$update->run();
+check($update->response->getData()['event']['correlationid'] === '91',
+    'Closure information comes from the recovery event, not the problem event');
+API::$recovery['correlationid'] = '0';
+API::$recovery['userid'] = '4';
+$update->run();
+check($update->response->getData()['event']['userid'] === '4', 'Update preserves the user who closed the event');
+API::$recovery['userid'] = '0';
+API::$event['r_eventid'] = '0';
 check($data['can_comment'], 'Update exposes the permitted comment action without loading a trigger');
 CController::$denied = [CRoleHelper::ACTIONS_ADD_PROBLEM_COMMENTS];
 $update->run();
@@ -361,6 +408,8 @@ foreach (['patterns', 'timeline'] as $tab) {
         return $call[0] === 'event' && isset($call[1]['time_from']);
     });
     check(count($ranges) === 1, 'Each historical tab must request only its own range');
+    check(array_values($ranges)[0][1]['filter'] === ['name' => API::$event['name']],
+        'Patterns and monthly comparisons share exact event-name filtering');
     check(!array_filter(API::$calls, static function ($call) { return $call[0] === 'trigger'; }),
         'Historical tabs skip unused parent trigger enrichment');
     check($tab !== 'patterns' || !isset(array_values($ranges)[0][1]['sortfield']),
@@ -531,6 +580,7 @@ check(isset(json_decode($more_history(100, 500)['main_block'], true)['error']), 
 // Event paging is stable across same-second rows, out-of-order timestamps and large IDs.
 $timeline_parent = ['eventid' => '9007199254741999', 'objectid' => '7', 'source' => EVENT_SOURCE_TRIGGERS,
     'object' => EVENT_OBJECT_TRIGGER, 'value' => TRIGGER_VALUE_TRUE, 'clock' => 100,
+    'name' => 'Error Notification - ID 1001',
     'acknowledged' => 0, 'severity' => 2, 'r_eventid' => '0', 'cause_eventid' => '0', 'acknowledges' => []];
 API::$timeline_events = [$timeline_parent];
 for ($number = 0; $number < 39; $number++) {
@@ -544,18 +594,26 @@ $foreign_id = bcsub($timeline_parent['eventid'], '600', 0);
 $future_id = bcadd($timeline_parent['eventid'], '1', 0);
 API::$timeline_events[] = array_replace($timeline_parent, ['eventid' => $foreign_id, 'objectid' => '8']);
 API::$timeline_events[] = array_replace($timeline_parent, ['eventid' => $future_id]);
+$other_name_id = bcsub($timeline_parent['eventid'], '601', 0);
+API::$timeline_events[] = array_replace($timeline_parent,
+    ['eventid' => $other_name_id, 'name' => 'Error Notification - ID 10010']);
 $event_page_method = new ReflectionMethod(Modules\AnalistProblem\Actions\CControllerAnalistProblemPopup::class, 'getTimelinePage');
 $event_page_method->setAccessible(true);
 $event_page = static function (?array $cursor = null) use ($timeline_parent, $event_page_method) {
     $input = ['eventid' => $timeline_parent['eventid'], 'tab' => $cursor ? 'timeline_events' : 'timeline'];
-    if ($cursor) $input += ['before_eventid' => $cursor['eventid'], 'before_clock' => $cursor['clock']];
+    if ($cursor) $input += ['before_eventid' => $cursor['eventid'], 'before_clock' => $cursor['clock']]
+        + (isset($cursor['group']) ? ['before_group' => $cursor['group']] : []);
     return $event_page_method->invoke(new ProblemControllerFixture($input), $timeline_parent);
 };
 API::$calls = [];
 $first_page = $event_page();
 check(count($first_page['events']) === 20 && $first_page['has_more'], 'Timeline starts with twenty events and a lookahead');
-check(API::$calls[0][1]['limit'] === 21 && in_array('message', API::$calls[0][1]['selectAcknowledges'], true),
-    'Paging retains complete native update data and requests one lookahead event');
+$detail_queries = array_values(array_filter(API::$calls, static function ($call) {
+    return $call[0] === 'event' && isset($call[1]['selectAcknowledges']);
+}));
+check(count($detail_queries) === 1 && count($detail_queries[0][1]['eventids']) === 20
+    && in_array('message', $detail_queries[0][1]['selectAcknowledges'], true),
+    'Paging fetches complete native action data only for twenty displayed events');
 $second_page = $event_page($first_page['cursor']);
 $final_page = $event_page($second_page['cursor']);
 check(count($second_page['events']) === 20 && $second_page['has_more'], 'More appends the next twenty events');
@@ -566,6 +624,7 @@ $loaded_ids = array_column(array_merge($first_page['events'], $second_page['even
 check(count(array_unique($loaded_ids)) === 44, 'All events load exactly once across a shared timestamp');
 check($event_page($final_page['cursor'])['events'] === [], 'An exhausted cursor returns an empty page');
 foreach ([['eventid' => $foreign_id, 'clock' => 100], ['eventid' => $future_id, 'clock' => 100],
+        ['eventid' => $other_name_id, 'clock' => 100],
         ['eventid' => $first_page['cursor']['eventid'], 'clock' => 99]] as $bad_cursor) {
     try { $event_page($bad_cursor); }
     catch (RuntimeException $exception) { continue; }
@@ -576,8 +635,60 @@ $more_controller = new ProblemControllerFixture(['eventid' => $timeline_parent['
     'before_eventid' => $first_page['cursor']['eventid'], 'before_clock' => $first_page['cursor']['clock']]);
 $more_controller->run();
 check(count($more_controller->response->getData()['timeline_page']['events']) === 20
-    && !array_filter(API::$calls, static function ($call) { return $call[0] !== 'event'; }),
+    && !array_filter(API::$calls, static function ($call) { return !in_array($call[0], ['event', 'problem'], true); }),
     'More skips monthly comparisons and unrelated tab data');
+
+// Priority applies to the complete history, including open events older than the initial page.
+$saved_timeline = API::$timeline_events;
+API::$timeline_events = [];
+for ($number = 0; $number < 48; $number++) {
+    API::$timeline_events[] = array_replace($timeline_parent, [
+        'eventid' => bcsub($timeline_parent['eventid'], (string) (1000 + $number), 0), 'clock' => 100 - $number,
+        'r_eventid' => in_array($number, [25, 39, 47, 5], true) ? '0' : '2',
+        'acknowledges' => $number === 5 ? [['action' => ZBX_PROBLEM_UPDATE_CLOSE]] : []
+    ]);
+}
+$mixed_first = $event_page();
+check(array_slice(array_column($mixed_first['events'], 'eventid'), 0, 3)
+    === array_column(array_intersect_key(API::$timeline_events, array_flip([25, 39, 47])), 'eventid'),
+    'Old Problem events precede newer resolved or Closing events before pagination');
+check($mixed_first['events'][3]['eventid'] === API::$timeline_events[0]['eventid']
+    && $mixed_first['events'][8]['eventid'] === API::$timeline_events[5]['eventid'],
+    'The other group retains newest-first order, including pending closure');
+$mixed_second = $event_page($mixed_first['cursor']);
+$mixed_final = $event_page($mixed_second['cursor']);
+$mixed_loaded = array_merge($mixed_first['events'], $mixed_second['events'], $mixed_final['events']);
+check(count($mixed_final['events']) === 8 && !$mixed_final['has_more']
+    && count(array_unique(array_column($mixed_loaded, 'eventid'))) === 48,
+    'A page containing both groups continues without skipping or duplicating events');
+
+// More can remain in the Problem group and then cross into history within the next page.
+for ($number = 0; $number < 60; $number++) {
+    API::$timeline_events[$number] = array_replace($timeline_parent, [
+        'eventid' => bcsub($timeline_parent['eventid'], (string) (1000 + $number), 0),
+        'r_eventid' => $number % 2 === 0 ? '0' : '2'
+    ]);
+}
+$priority_first = $event_page();
+$priority_second = $event_page($priority_first['cursor']);
+$priority_final = $event_page($priority_second['cursor']);
+check($priority_first['cursor']['group'] === 'problem' && $priority_second['cursor']['group'] === 'other',
+    'The cursor records the group when crossing the twenty-event boundary');
+$priority_loaded = array_merge($priority_first['events'], $priority_second['events'], $priority_final['events']);
+check(array_column(array_slice($priority_loaded, 0, 30), 'r_eventid') === array_fill(0, 30, '0')
+    && array_column(array_slice($priority_loaded, 30), 'r_eventid') === array_fill(0, 30, '2')
+    && count(array_unique(array_column($priority_loaded, 'eventid'))) === 60 && !$priority_final['has_more'],
+    'All Problem events come before all resolved events across multiple same-second pages');
+foreach ([array_slice($priority_loaded, 0, 30), array_slice($priority_loaded, 30)] as $group_events) {
+    for ($number = 1; $number < count($group_events); $number++) {
+        check(bccomp($group_events[$number - 1]['eventid'], $group_events[$number]['eventid']) > 0,
+            'Same-second order remains stable within each group');
+    }
+}
+API::$timeline_events = array_map(static function ($row) { return array_replace($row, ['r_eventid' => '2']); },
+    API::$timeline_events);
+check(count($event_page()['events']) === 20, 'An entirely resolved history still loads its newest twenty events');
+API::$timeline_events = $saved_timeline;
 API::$timeline_events = false;
 try { $event_page(); throw new Exception('A failed history query must not look like exhaustion'); }
 catch (RuntimeException $exception) {}

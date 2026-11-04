@@ -12,7 +12,7 @@ require $ui_root.'/include/classes/core/CAutoloader.php';
 $autoloader = new CAutoloader();
 $autoloader->addNamespace('', [$ui_root.'/include/classes/html', $ui_root.'/include/classes/core',
     $ui_root.'/include/classes/html/interfaces', $ui_root.'/include/classes/helpers', $ui_root.'/include/classes/parsers',
-    $ui_root.'/include/classes/validators', $ui_root.'/include/classes/mvc']);
+    $ui_root.'/include/classes/validators', $ui_root.'/include/classes/mvc', $ui_root.'/include/classes/screens']);
 $autoloader->register();
 set_error_handler(static function ($severity, $message, $file, $line) {
     throw new ErrorException($message, 0, $severity, $file, $line);
@@ -55,14 +55,23 @@ class ViewApiFixture {
     public function get($options) {
         if ($this->kind === 'trigger') return ['7' => ['triggerid' => '7', 'priority' => 2,
             'manual_close' => ZBX_TRIGGER_MANUAL_CLOSE_ALLOWED]];
+        if (in_array($this->kind, ['users', 'correlations', 'maintenances'], true)) {
+            $rows = API::${$this->kind};
+            return !empty($options['preservekeys']) ? $rows : array_values($rows);
+        }
         return [];
     }
 }
 class API {
+    public static $users = [];
+    public static $correlations = [];
+    public static $maintenances = [];
     public static function Event() { return new ViewApiFixture(); }
     public static function Alert() { return new ViewApiFixture(); }
     public static function Trigger() { return new ViewApiFixture('trigger'); }
-    public static function User() { return new ViewApiFixture(); }
+    public static function User() { return new ViewApiFixture('users'); }
+    public static function Correlation() { return new ViewApiFixture('correlations'); }
+    public static function Maintenance() { return new ViewApiFixture('maintenances'); }
     public static function Mediatype() { return new ViewApiFixture(); }
 }
 CView::registerDirectory(dirname(__DIR__).'/views');
@@ -78,6 +87,35 @@ if ($scenario === 'recovered') {
     $event['recovery_clock'] = $event['clock'] + 120;
 }
 if ($scenario === 'recovery-unavailable') $event['r_eventid'] = '2';
+if (str_starts_with($scenario, 'info-')) {
+    API::$users = ['4' => ['username' => 'operator <one>', 'name' => 'Test', 'surname' => 'User']];
+    API::$correlations = ['91' => ['name' => 'Deduplicate <errors>']];
+    API::$maintenances = ['7' => ['name' => 'Night <maintenance>']];
+    $event['suppression_data'] = [];
+    if (in_array($scenario, ['info-correlation', 'info-correlation-inaccessible', 'info-both'], true)) {
+        $event['r_eventid'] = '2';
+        $event['correlationid'] = '91';
+    }
+    if (in_array($scenario, ['info-manual', 'info-user-inaccessible'], true)) {
+        $event['r_eventid'] = '2';
+        $event['userid'] = '4';
+    }
+    if ($scenario === 'info-correlation-inaccessible') API::$correlations = [];
+    if ($scenario === 'info-user-inaccessible') API::$users = [];
+    if (in_array($scenario, ['info-suppressed', 'info-unsuppressed'], true)) {
+        $event['suppression_data'] = [['maintenanceid' => '0', 'userid' => '4',
+            'suppress_until' => ZBX_PROBLEM_SUPPRESS_TIME_INDEFINITE]];
+    }
+    if (in_array($scenario, ['info-maintenance', 'info-maintenance-inaccessible', 'info-both'], true)) {
+        $event['suppression_data'] = [['maintenanceid' => '7', 'userid' => '0', 'suppress_until' => time() + 3600]];
+    }
+    if ($scenario === 'info-maintenance-inaccessible') API::$maintenances = [];
+    if (in_array($scenario, ['info-pending-suppression', 'info-unsuppressed'], true)) {
+        $event['acknowledges'] = [['acknowledgeid' => '1', 'userid' => '4', 'clock' => time(), 'message' => '',
+            'action' => $scenario === 'info-unsuppressed' ? ZBX_PROBLEM_UPDATE_UNSUPPRESS : ZBX_PROBLEM_UPDATE_SUPPRESS,
+            'old_severity' => 0, 'new_severity' => 0, 'suppress_until' => ZBX_PROBLEM_SUPPRESS_TIME_INDEFINITE]];
+    }
+}
 $trigger = null;
 if ($scenario === 'details') {
     $trigger = [
@@ -165,7 +203,7 @@ $view = new CView('problemanalist.view', [
     'timeline_page' => ['events' => $timeline_events,
         'has_more' => $timeline_events && $scenario !== 'timeline-final-page',
         'cursor' => $last_timeline_event
-            ? ['eventid' => $last_timeline_event['eventid'], 'clock' => $last_timeline_event['clock']] : null],
+            ? ['eventid' => $last_timeline_event['eventid'], 'clock' => $last_timeline_event['clock'], 'group' => 'problem'] : null],
     'monthly_comparison' => ['months' => [['name' => 'March 2026', 'count' => 1, 'change_percentage' => 0]]]
 ]);
 $response = json_decode($view->getOutput(), true, 512, JSON_THROW_ON_ERROR);

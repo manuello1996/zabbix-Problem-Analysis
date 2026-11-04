@@ -45,6 +45,7 @@ class CControllerAnalistProblemPopup extends CController {
             'before_clock'  => 'int32|ge 0',
             'before_ns'     => 'int32|ge 0|le 999999999',
             'before_eventid' => 'id',
+            'before_group' => 'in problem,other',
             'graph_period'  => 'in around,before,duration,day,custom',
             'graph_layout'  => 'in items,combined',
             'graph_from'    => 'range_time',
@@ -122,6 +123,7 @@ class CControllerAnalistProblemPopup extends CController {
             ],
             'eventids' => $eventid,
             'selectTags' => $tab === 'overview' ? ['tag', 'value'] : null,
+            'selectSuppressionData' => $tab === 'update' ? ['maintenanceid', 'userid', 'suppress_until'] : null,
             'selectAcknowledges' => $tab === 'update' ? ['acknowledgeid', 'clock', 'userid', 'message', 'action',
                 'old_severity', 'new_severity', 'suppress_until'
             ] : null
@@ -173,14 +175,18 @@ class CControllerAnalistProblemPopup extends CController {
 
         $recovery_eventid = (int) ($event['r_eventid'] ?? 0);
 
-        if ($recovery_eventid > 0 && in_array($tab, ['overview', 'graphs'], true)) {
+        if ($recovery_eventid > 0 && in_array($tab, ['overview', 'graphs', 'update'], true)) {
             $recovery_events = API::Event()->get([
-                'output' => ['eventid', 'clock'],
+                'output' => $tab === 'update' ? ['eventid', 'clock', 'correlationid', 'userid'] : ['eventid', 'clock'],
                 'eventids' => $recovery_eventid
             ]);
 
             if ($recovery_events) {
                 $event['recovery_clock'] = $recovery_events[0]['clock'];
+                if ($tab === 'update') {
+                    $event['correlationid'] = $recovery_events[0]['correlationid'];
+                    $event['userid'] = $recovery_events[0]['userid'];
+                }
             }
         }
 
@@ -298,14 +304,10 @@ class CControllerAnalistProblemPopup extends CController {
                 return;
             }
 
-            $pattern_events = API::Event()->get([
+            $pattern_events = API::Event()->get($this->getRelatedEventOptions($event) + [
                 'output'    => ['clock'],
-                'source'    => EVENT_SOURCE_TRIGGERS,
-                'object'    => EVENT_OBJECT_TRIGGER,
-                'objectids' => $actual_triggerid,
                 'time_from' => $pattern_timeline['from_ts'],
-                'time_till' => $pattern_timeline['to_ts'],
-                'value'     => TRIGGER_VALUE_TRUE,
+                'time_till' => $pattern_timeline['to_ts']
             ]);
             if ($pattern_events === false) {
                 $this->setResponse((new CControllerResponseData(['main_block' => json_encode([
@@ -371,14 +373,10 @@ class CControllerAnalistProblemPopup extends CController {
                 ];
             }
 
-            $comparison_events = API::Event()->get([
+            $comparison_events = API::Event()->get($this->getRelatedEventOptions($event) + [
                 'output'    => ['clock'],
-                'source'    => 0,
-                'object'    => 0,
-                'objectids' => $actual_triggerid,
                 'time_from' => $months[5]['start'],
-                'time_till' => $months[0]['end'],
-                'value'     => 1
+                'time_till' => $months[0]['end']
             ]);
             if ($comparison_events === false) {
                 $this->setResponse((new CControllerResponseData(['main_block' => json_encode([
@@ -488,66 +486,122 @@ class CControllerAnalistProblemPopup extends CController {
         $this->setResponse(new CControllerResponseData($data));
     }
 
-    /**
-     * Get system metrics at event time based on host interface type
-     */
-    /**
-     * Get comprehensive host data for hostcard display
-     */
+    /** Related occurrences share the trigger and the exact name stored when the event was raised. */
+    private function getRelatedEventOptions(array $event): array {
+        return ['source' => EVENT_SOURCE_TRIGGERS, 'object' => EVENT_OBJECT_TRIGGER,
+            'value' => TRIGGER_VALUE_TRUE, 'objectids' => $event['objectid'],
+            'filter' => ['name' => $event['name']]];
+    }
+
     private function getTimelinePage(array $event): array {
-        $options = [
-            'output' => ['eventid', 'source', 'object', 'objectid', 'acknowledged', 'clock', 'ns', 'severity',
-                'r_eventid', 'cause_eventid'],
-            'selectAcknowledges' => ['userid', 'clock', 'message', 'action', 'old_severity', 'new_severity',
-                'suppress_until', 'taskid'],
-            'source' => EVENT_SOURCE_TRIGGERS, 'object' => EVENT_OBJECT_TRIGGER, 'value' => TRIGGER_VALUE_TRUE,
-            'objectids' => $event['objectid'], 'eventid_till' => $event['eventid'],
-            'sortfield' => ['clock', 'eventid'], 'sortorder' => ZBX_SORT_DOWN, 'limit' => 21
+        $options = $this->getRelatedEventOptions($event) + [
+            'output' => ['eventid', 'clock'],
+            'eventid_till' => $event['eventid'],
+            'sortfield' => ['clock', 'eventid'], 'sortorder' => ZBX_SORT_DOWN
         ];
         $read = static function (array $query): array {
             $events = API::Event()->get($query);
             if (!is_array($events)) throw new \RuntimeException(_('Unable to load recent events.'));
-            return array_values($events);
+            return $events;
         };
+        $cursor = null;
         if ($this->getInput('tab', 'overview') === 'timeline_events') {
             $before_id = (string) $this->getInput('before_eventid');
             $before_clock = (int) $this->getInput('before_clock');
             $cursor_events = API::Event()->get([
-                'output' => ['eventid', 'source', 'object', 'objectid', 'clock', 'value'], 'eventids' => [$before_id]
+                'output' => ['eventid', 'source', 'object', 'objectid', 'clock', 'value', 'name'], 'eventids' => [$before_id]
             ]);
             $cursor = $cursor_events ? $cursor_events[0] : null;
             if (!$cursor || (string) $cursor['objectid'] !== (string) $event['objectid']
+                    || $cursor['name'] !== $event['name']
                     || (int) $cursor['source'] !== EVENT_SOURCE_TRIGGERS
                     || (int) $cursor['object'] !== EVENT_OBJECT_TRIGGER || (int) $cursor['value'] !== TRIGGER_VALUE_TRUE
                     || (int) $cursor['clock'] !== $before_clock || bccomp($before_id, (string) $event['eventid']) > 0) {
                 throw new \RuntimeException(_('Recent event not found or access denied.'));
             }
-            // Same-second events first, then older seconds. Zabbix's BC Math scale is fractional;
-            // event IDs must remain integer strings for native API validation.
-            $events = bccomp($before_id, '1') > 0 ? $read(array_replace($options, [
-                'time_from' => $before_clock, 'time_till' => $before_clock, 'eventid_till' => bcsub($before_id, '1', 0)
-            ])) : [];
-            if (count($events) < 21 && $before_clock > 0) {
-                $events = array_merge($events, $read(array_replace($options, [
-                    'time_till' => $before_clock - 1, 'limit' => 21 - count($events)
-                ])));
+        }
+
+        // Fetch only unresolved metadata. Native problem.get does not support clock sorting;
+        // sort this group locally, then fetch full event/action data for the displayed page only.
+        $problem_options = $this->getRelatedEventOptions($event);
+        unset($problem_options['value']);
+        $problems = API::Problem()->get($problem_options + [
+            'output' => ['eventid', 'clock'], 'eventid_till' => $event['eventid'],
+            'selectAcknowledges' => ['action'], 'recent' => false
+        ]);
+        if (!is_array($problems)) throw new \RuntimeException(_('Unable to load recent events.'));
+        $problems = array_values(array_filter($problems, static function (array $problem): bool {
+            foreach ($problem['acknowledges'] as $ack) {
+                if (((int) $ack['action'] & ZBX_PROBLEM_UPDATE_CLOSE) !== 0) return false;
+            }
+            return true;
+        }));
+        usort($problems, static function (array $left, array $right): int {
+            return ((int) $right['clock'] <=> (int) $left['clock']) ?: bccomp($right['eventid'], $left['eventid']);
+        });
+        $problem_ids = array_fill_keys(array_column($problems, 'eventid'), true);
+        $group = $cursor ? $this->getInput('before_group', isset($problem_ids[$cursor['eventid']]) ? 'problem' : 'other') : 'problem';
+        $page = [];
+        if ($group === 'problem') {
+            foreach ($problems as $problem) {
+                if ($cursor && ((int) $problem['clock'] > (int) $cursor['clock']
+                        || ((int) $problem['clock'] === (int) $cursor['clock']
+                            && bccomp($problem['eventid'], $cursor['eventid']) >= 0))) continue;
+                $page[] = $problem + ['group' => 'problem'];
+                if (count($page) === 21) break;
             }
         }
-        else {
-            $events = $read($options);
+
+        // Read the other group from its newest event after the Problem group is exhausted.
+        // Advancing a timestamp/ID cursor avoids repeatedly scanning the same open events.
+        $read_older = static function (?array $before, int $limit) use ($read, $options): array {
+            if (!$before) return $read($options + ['limit' => $limit]);
+            $clock = (int) $before['clock'];
+            $rows = bccomp($before['eventid'], '1') > 0 ? $read(array_replace($options, [
+                'time_from' => $clock, 'time_till' => $clock,
+                'eventid_till' => bcsub($before['eventid'], '1', 0), 'limit' => $limit
+            ])) : [];
+            if (count($rows) < $limit && $clock > 0) {
+                $rows = array_merge($rows, $read($options + ['time_till' => $clock - 1, 'limit' => $limit - count($rows)]));
+            }
+            return $rows;
+        };
+        $scan_cursor = $group === 'other' ? $cursor : null;
+        while (count($page) < 21) {
+            $rows = $read_older($scan_cursor, 100);
+            foreach ($rows as $row) {
+                if (isset($problem_ids[$row['eventid']])) continue;
+                $page[] = $row + ['group' => 'other'];
+                if (count($page) === 21) break;
+            }
+            if (count($rows) < 100) break;
+            $scan_cursor = $rows[count($rows) - 1];
         }
-        $has_more = count($events) > 20;
-        $events = array_slice($events, 0, 20);
-        $last = $events ? $events[count($events) - 1] : null;
+
+        $has_more = count($page) > 20;
+        $page = array_slice($page, 0, 20);
+        $details = $page ? $read($this->getRelatedEventOptions($event) + [
+            'eventids' => array_column($page, 'eventid'), 'preservekeys' => true,
+            'output' => ['eventid', 'source', 'object', 'objectid', 'acknowledged', 'clock', 'ns', 'severity',
+                'r_eventid', 'cause_eventid'],
+            'selectAcknowledges' => ['userid', 'clock', 'message', 'action', 'old_severity', 'new_severity',
+                'suppress_until', 'taskid']
+        ]) : [];
+        $events = [];
+        foreach ($page as $row) {
+            if (isset($details[$row['eventid']])) $events[] = $details[$row['eventid']];
+        }
+        $last = $page ? $page[count($page) - 1] : null;
         return ['events' => $events, 'has_more' => $has_more,
-            'cursor' => $last ? ['eventid' => (string) $last['eventid'], 'clock' => (int) $last['clock']] : null];
+            'cursor' => $last ? ['eventid' => (string) $last['eventid'], 'clock' => (int) $last['clock'],
+                'group' => $last['group']] : null];
     }
 
     private function getRecurrenceCounts(): void {
         try {
             $eventids = array_values(array_unique($this->getInput('recurrence_eventids', [$this->getInput('eventid')])));
             $events = API::Event()->get([
-                'output' => ['eventid', 'source', 'object', 'objectid', 'value'],
+                'output' => ['eventid', 'source', 'object', 'objectid', 'value', 'name'],
                 'eventids' => $eventids,
                 'source' => EVENT_SOURCE_TRIGGERS, 'object' => EVENT_OBJECT_TRIGGER, 'value' => TRIGGER_VALUE_TRUE
             ]);
@@ -561,17 +615,23 @@ class CControllerAnalistProblemPopup extends CController {
             $parser->parse('now-6M');
             $time_from = $parser->getDateTime(true)->getTimestamp();
             $time_till = time();
-            $counts = API::Event()->get([
-                'countOutput' => true, 'groupBy' => ['objectid'],
-                'source' => EVENT_SOURCE_TRIGGERS, 'object' => EVENT_OBJECT_TRIGGER, 'value' => TRIGGER_VALUE_TRUE,
-                'objectids' => array_values(array_unique(array_column($events, 'objectid'))),
-                'time_from' => $time_from, 'time_till' => $time_till
-            ]);
-            if (!is_array($counts)) throw new \RuntimeException(_('Unable to load recurrence counts.'));
-            $counts_by_trigger = [];
-            foreach ($counts as $count) $counts_by_trigger[$count['objectid']] = (string) $count['rowscount'];
+            // Native event.get groups counts by objectid only. Batch triggers sharing an exact name
+            // instead of fetching every historical event or mixing different macro expansions.
+            $events_by_name = [];
+            foreach ($events as $event) $events_by_name[$event['name']][] = $event;
             $result = [];
-            foreach ($events as $event) $result[$event['eventid']] = $counts_by_trigger[$event['objectid']] ?? '0';
+            foreach ($events_by_name as $same_name_events) {
+                $options = $this->getRelatedEventOptions($same_name_events[0]);
+                $options['objectids'] = array_values(array_unique(array_column($same_name_events, 'objectid')));
+                $counts = API::Event()->get($options + ['countOutput' => true, 'groupBy' => ['objectid'],
+                    'time_from' => $time_from, 'time_till' => $time_till]);
+                if (!is_array($counts)) throw new \RuntimeException(_('Unable to load recurrence counts.'));
+                $counts_by_trigger = [];
+                foreach ($counts as $count) $counts_by_trigger[$count['objectid']] = (string) $count['rowscount'];
+                foreach ($same_name_events as $event) {
+                    $result[$event['eventid']] = $counts_by_trigger[$event['objectid']] ?? '0';
+                }
+            }
             $response = ['counts' => (object) $result, 'time_from' => $time_from, 'time_till' => $time_till];
         }
         catch (\Exception $exception) {

@@ -137,6 +137,60 @@ if ($problem_actions['canAcknowledge']) {
         ->addClass('btn-alt')->setAttribute('data-problem-action', $is_acknowledged ? 'unacknowledge' : 'acknowledge'));
 }
 
+/** Expand native information hints into a section matching the action history table. */
+function createAnalistProblemInfo(array $event, array $users): ?CSectionCollapsible {
+    $icons = [];
+    if (!empty($event['r_eventid'])) {
+        if (!empty($event['correlationid'])) {
+            $correlations = API::Correlation()->get([
+                'output' => ['name'], 'correlationids' => [$event['correlationid']]
+            ]);
+            $icons[] = makeInformationIcon($correlations
+                ? _s('Resolved by event correlation rule "%1$s".', $correlations[0]['name'])
+                : _('Resolved by event correlation rule.'));
+        }
+        elseif (!empty($event['userid'])) {
+            $icons[] = makeInformationIcon(isset($users[$event['userid']])
+                ? _s('Resolved by user "%1$s".', getUserFullname($users[$event['userid']]))
+                : _('Resolved by inaccessible user.'));
+        }
+    }
+
+    $suppressions = $event['suppression_data'] ?? [];
+    if (count($suppressions) === 1 && $suppressions[0]['maintenanceid'] == 0
+            && isEventRecentlyUnsuppressed($event['acknowledges'], $unsuppression)) {
+        $icons[] = (new CButtonIcon(ZBX_ICON_EYE))->addClass(ZBX_STYLE_COLOR_ICON)->addClass('js-blink')
+            ->setHint(_s('Unsuppressed by: %1$s', isset($users[$unsuppression['userid']])
+                ? getUserFullname($users[$unsuppression['userid']]) : _('Inaccessible user')));
+    }
+    elseif ($suppressions) {
+        $problems = [$event];
+        CScreenProblem::addSuppressionNames($problems);
+        $icons[] = makeSuppressedProblemIcon($problems[0]['suppression_data']);
+    }
+    elseif (isEventRecentlySuppressed($event['acknowledges'], $suppression)) {
+        $icons[] = makeSuppressedProblemIcon([[
+            'suppress_until' => $suppression['suppress_until'],
+            'username' => isset($users[$suppression['userid']])
+                ? getUserFullname($users[$suppression['userid']]) : _('Inaccessible user')
+        ]], true);
+    }
+
+    if (!$icons) return null;
+
+    $table = (new CTableInfo())->setHeader([null, _('Details')]);
+    foreach ($icons as $icon) {
+        // Native hints contain escaped text. Decode once, then let CCol escape the visible text again.
+        $details = html_entity_decode($icon->getAttribute('data-hintbox-contents'), ENT_QUOTES | ENT_HTML5, 'UTF-8');
+        $table->addRow([
+            (new CCol($icon))->addStyle('width: 1%;'),
+            (new CCol($details))->addClass(ZBX_STYLE_WORDBREAK)->addStyle('white-space: pre-line;')
+        ]);
+    }
+    return (new CSectionCollapsible($table))->setId(uniqid('analist-info-'))
+        ->setHeader(new CTag('h4', true, _('Info')))->setExpanded(true)->setAttribute('data-problem-info', '');
+}
+
 function createAnalistHistoryValue($value, array $item) {
     if ((int) ($item['value_type'] ?? -1) === ITEM_VALUE_TYPE_BINARY) {
         return italic(_('binary value'))->addClass(ZBX_STYLE_GREY);
@@ -625,6 +679,7 @@ foreach (createAnalistTimelineRows($page['events']) as $row) $timeline_table->ad
 $more = (new CButton(null, _('More')))->addClass('btn-alt')->setAttribute('data-timeline-more', '')
     ->setAttribute('data-before-eventid', $page['cursor']['eventid'] ?? '')
     ->setAttribute('data-before-clock', $page['cursor']['clock'] ?? '')
+    ->setAttribute('data-before-group', $page['cursor']['group'] ?? 'problem')
     ->setAttribute('aria-label', _('Load 20 more events'));
 if (!$page['has_more']) $more->setAttribute('hidden', 'hidden');
 
@@ -650,7 +705,10 @@ $panels['patterns'] = $time_patterns_div;
 
 // TAB 5: Native chart rendering, selectors, calendars and collapsible graph sections.
 $graphs_div = (new CDiv())->addClass('analist-graphs');
-if ($active_tab === 'graphs') {
+if ($active_tab === 'graphs' && !$items) {
+    $graphs_div->addItem((new CTableInfo())->setNoDataMessage(_('No numeric items are available for this event.')));
+}
+elseif ($active_tab === 'graphs') {
     $timeline = $data['graph_timeline'];
     $has_multiple_items = count($items) >= 2;
     $graph_layout = $has_multiple_items ? ($data['graph_layout'] ?? 'items') : 'items';
@@ -701,7 +759,7 @@ if ($active_tab === 'graphs') {
         ]));
 
     $graph_groups = [];
-    if ($graph_layout === 'combined' && $items) {
+    if ($graph_layout === 'combined') {
         $graph_groups[] = ['title' => _('Combined metrics'), 'itemids' => array_column($items, 'itemid')];
     }
     else {
@@ -732,9 +790,6 @@ if ($active_tab === 'graphs') {
                 ]))->addClass('analist-graph-links')
             ])->setExpanded(true));
     }
-    if (!$graph_groups) {
-        $graphs_div->addItem((new CTableInfo())->setNoDataMessage(_('No numeric items are available for this event.')));
-    }
 }
 $panels['graphs'] = $graphs_div;
 
@@ -761,9 +816,11 @@ if ($active_tab === 'update' && !empty($event['eventid'])) {
             ->setAttribute('role', 'status')->setAttribute('aria-live', 'polite'));
     }
     $actions = getEventDetailsActions($event);
-    $users = !empty($actions['userids']) ? API::User()->get([
+    $userids = $actions['userids'];
+    if (!empty($event['userid'])) $userids[$event['userid']] = true;
+    $users = $userids ? API::User()->get([
         'output' => ['username', 'name', 'surname'],
-        'userids' => array_keys($actions['userids']),
+        'userids' => array_keys($userids),
         'preservekeys' => true
     ]) : [];
     $mediatypes = !empty($actions['mediatypeids']) ? API::Mediatype()->get([
@@ -771,9 +828,10 @@ if ($active_tab === 'update' && !empty($event['eventid'])) {
         'mediatypeids' => array_keys($actions['mediatypeids']),
         'preservekeys' => true
     ]) : [];
+    $update_div->addItem(createAnalistProblemInfo($event, $users));
     $update_div->addItem((new CSectionCollapsible(
         makeEventDetailsActionsTable($actions, $users, $mediatypes)
-    ))->setHeader(new CTag('h4', true, _('Actions')))->setExpanded(true));
+    ))->setId(uniqid('analist-actions-'))->setHeader(new CTag('h4', true, _('Actions')))->setExpanded(true));
 }
 
 // Add the tab.

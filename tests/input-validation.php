@@ -58,6 +58,9 @@ foreach (['before_eventid', 'before_clock'] as $field) {
 }
 $validate(array_replace($timeline_request, ['before_eventid' => 'invalid']), false);
 $validate(array_replace($timeline_request, ['before_clock' => '-1']), false);
+$validate($timeline_request + ['before_group' => 'problem'], true);
+$validate($timeline_request + ['before_group' => 'other'], true);
+$validate($timeline_request + ['before_group' => 'invalid'], false);
 $validate(['eventid' => '1', 'initial_tab' => 'timeline'], true);
 $validate(['eventid' => '1', 'initial_tab' => 'invalid'], false);
 $validate(['eventid' => '1', 'tab' => 'recurrences'], true);

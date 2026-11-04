@@ -157,7 +157,8 @@ document.addEventListener('DOMContentLoaded', () => {
                 cell.className = 'analist-recurrences-cell';
                 row.insertBefore(cell, row.querySelector('.lts-column-cell'));
             }
-            const key = data.triggerid ? 'trigger:' + data.triggerid : 'event:' + data.eventid;
+            const key = data.triggerid && data.problemName
+                ? JSON.stringify([String(data.triggerid), data.problemName]) : 'event:' + data.eventid;
             let group = this.recurrenceGroups.get(key);
             if (!group) {
                 group = {key, cells: new Set(), status: 'idle', expires: 0};
@@ -320,7 +321,7 @@ document.addEventListener('DOMContentLoaded', () => {
                         const triggerData = JSON.parse(triggerElement.getAttribute('data-menu-popup'));
                         if (triggerData.data && triggerData.data.triggerid) {
                             triggerid = triggerData.data.triggerid;
-                            problemName = triggerElement.textContent.trim();
+                            problemName = triggerElement.textContent;
                             eventid = eventid || triggerData.data.eventid;
                         }
                     } catch (e) {
@@ -452,11 +453,8 @@ document.addEventListener('DOMContentLoaded', () => {
                     }
                 }
 
-                // Extrai nome do problema
-                const problemCell = row.querySelector('td:nth-child(3), td:nth-child(4)');
-                if (problemCell) {
-                    problemName = problemCell.textContent.trim();
-                }
+                // Without the native problem link, keep an event-specific cache key.
+                // Table column positions vary and cannot identify the resolved event name.
 
                 // Se não conseguiu extrair eventid, tenta de outra forma
                 if (!eventid) {
