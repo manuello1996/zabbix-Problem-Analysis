@@ -31,7 +31,7 @@ class CControllerAnalistProblemPopup extends CController {
     protected function checkInput(): bool {
         $fields = [
             'eventid'       => 'required|id',
-            'tab'           => 'string|in overview,host,timeline,timeline_events,patterns,graphs,update,history,recurrences',
+            'tab'           => 'string|in overview,host,timeline,timeline_events,monthly,patterns,graphs,update,history,recurrences',
             'initial_tab'   => 'in overview,timeline',
             'recurrence_eventids' => 'array_id',
             'triggerid'     => 'id',
@@ -52,7 +52,10 @@ class CControllerAnalistProblemPopup extends CController {
             'graph_to'      => 'range_time',
             'pattern_period' => 'in 1,3,6,12,custom',
             'pattern_from' => 'range_time',
-            'pattern_to' => 'range_time'
+            'pattern_to' => 'range_time',
+            'comparison_period' => 'in 3,6,12,custom',
+            'comparison_from' => 'range_time',
+            'comparison_to' => 'range_time'
         ];
 
         $ret = $this->validateInput($fields);
@@ -85,6 +88,12 @@ class CControllerAnalistProblemPopup extends CController {
                 && $this->getInput('pattern_period', '12') === 'custom') {
             $ret = $this->validateInput(array_replace($fields, [
                 'pattern_from' => 'required|range_time', 'pattern_to' => 'required|range_time'
+            ]));
+        }
+        if ($ret && in_array($this->getInput('tab', 'overview'), ['timeline', 'monthly'], true)
+                && $this->getInput('comparison_period', '6') === 'custom') {
+            $ret = $this->validateInput(array_replace($fields, [
+                'comparison_from' => 'required|range_time', 'comparison_to' => 'required|range_time'
             ]));
         }
 
@@ -144,11 +153,13 @@ class CControllerAnalistProblemPopup extends CController {
             $this->getMoreHistory($event);
             return;
         }
-        if ($tab === 'timeline_events') {
+        if (in_array($tab, ['timeline_events', 'monthly'], true)) {
             try {
                 $this->setResponse(new CControllerResponseData([
-                    'tab' => $tab, 'event' => $event, 'timeline_page' => $this->getTimelinePage($event)
-                ]));
+                    'tab' => $tab, 'event' => $event
+                ] + ($tab === 'monthly'
+                    ? ['monthly_comparison' => $this->getMonthlyComparison($event)]
+                    : ['timeline_page' => $this->getTimelinePage($event)])));
             }
             catch (\Exception $exception) {
                 $this->setResponse((new CControllerResponseData(['main_block' => json_encode([
@@ -295,7 +306,7 @@ class CControllerAnalistProblemPopup extends CController {
         $pattern_timeline = null;
         if ($tab === 'patterns' && $actual_triggerid > 0) {
             try {
-                $pattern_timeline = $this->getPatternTimeline($event);
+                $pattern_timeline = $this->getCalendarTimeline($event);
             }
             catch (\Exception $exception) {
                 $this->setResponse((new CControllerResponseData(['main_block' => json_encode([
@@ -348,84 +359,19 @@ class CControllerAnalistProblemPopup extends CController {
             }
         }
 
-        // Get monthly comparison data (last 6 months)
+        // Aggregate monthly counts in the API; never transfer all matching event timestamps.
         $monthly_comparison = [];
-
-        if ($tab === 'timeline' && $actual_triggerid > 0 && isset($event['clock'])) {
-            $event_timestamp = (int)$event['clock'];
-
-            // Base at the first day of the event's month 00:00:00
-            $base_month_start = strtotime(date('Y-m-01 00:00:00', $event_timestamp));
-
-            $months = [];
-
-            // Build last 6 months: 0 = current month, 1..5 = back in time.
-            for ($i = 0; $i < 6; $i++) {
-                $start = strtotime("-{$i} month", $base_month_start);
-                $end = mktime(23, 59, 59, (int)date('n', $start), (int)date('t', $start), (int)date('Y', $start));
-
-                $months[$i] = [
-                    'name'   => date('F Y', $start),
-                    'count'  => 0,
-                    'events' => [],
-                    'start'  => $start,
-                    'end'    => $end
-                ];
+        if ($tab === 'timeline') {
+            try {
+                $monthly_comparison = $this->getMonthlyComparison($event);
             }
-
-            $comparison_events = API::Event()->get($this->getRelatedEventOptions($event) + [
-                'output'    => ['clock'],
-                'time_from' => $months[5]['start'],
-                'time_till' => $months[0]['end']
-            ]);
-            if ($comparison_events === false) {
+            catch (\Exception $exception) {
                 $this->setResponse((new CControllerResponseData(['main_block' => json_encode([
-                    'error' => ['messages' => [_('Unable to load monthly comparison.')]]
+                    'error' => ['messages' => [$exception->getMessage()]]
                 ])]))->disableView());
                 return;
             }
-
-            foreach ($comparison_events as $comparison_event) {
-                $clock = (int) $comparison_event['clock'];
-
-                foreach ($months as &$month) {
-                    if ($clock >= $month['start'] && $clock <= $month['end']) {
-                        $month['events'][] = $comparison_event;
-                        $month['count']++;
-                        break;
-                    }
-                }
-                unset($month);
-            }
-
-            // Add month-over-month percentage change for each entry where we have a previous month
-            for ($i = 0; $i < 6; $i++) {
-                if (!isset($months[$i + 1])) {
-                    $months[$i]['change_percentage'] = null; // no previous to compare to
-                    continue;
-                }
-
-                $prev = (int)$months[$i + 1]['count'];
-                $cur  = (int)$months[$i]['count'];
-
-                if ($prev > 0) {
-                    $months[$i]['change_percentage'] = round((($cur - $prev) / $prev) * 100, 1);
-                } else {
-                    $months[$i]['change_percentage'] = ($cur > 0) ? 100.0 : 0.0;
-                }
-            }
-
-            $monthly_comparison = [
-                'months' => $months,
-
-                // Backward compatibility (your current view code uses these)
-                'current_month'    => $months[0],
-                'previous_month'   => $months[1] ?? ['name' => '', 'count' => 0, 'events' => [], 'start' => null, 'end' => null],
-                'change_percentage'=> $months[0]['change_percentage'] ?? 0
-            ];
         }
-        // Get monthly comparison data
-
 
         $operational_data = $tab === 'overview'
             ? $this->getOperationalData($trigger, $event, $trigger_items)
@@ -491,6 +437,31 @@ class CControllerAnalistProblemPopup extends CController {
         return ['source' => EVENT_SOURCE_TRIGGERS, 'object' => EVENT_OBJECT_TRIGGER,
             'value' => TRIGGER_VALUE_TRUE, 'objectids' => $event['objectid'],
             'filter' => ['name' => $event['name']]];
+    }
+
+    private function getMonthlyComparison(array $event): array {
+        $timeline = $this->getCalendarTimeline($event, 'comparison', '6');
+        $months = [];
+        $previous = null;
+        $start = strtotime(date('Y-m-01 00:00:00', $timeline['from_ts']));
+        while ($start <= $timeline['to_ts']) {
+            $next = strtotime('+1 month', $start);
+            $count = API::Event()->get($this->getRelatedEventOptions($event) + [
+                'countOutput' => true,
+                'time_from' => max($start, $timeline['from_ts']),
+                'time_till' => min($next - 1, $timeline['to_ts'])
+            ]);
+            if ($count === false) throw new \RuntimeException(_('Unable to load monthly comparison.'));
+            $count = (int) $count;
+            $months[] = ['name' => zbx_date2str('F Y', $start), 'count' => $count,
+                'change_percentage' => $previous === null ? null : ($previous > 0
+                    ? round(($count - $previous) / $previous * 100, 1) : ($count > 0 ? 100.0 : 0.0))];
+            $previous = $count;
+            $start = $next;
+        }
+        $months = array_reverse($months);
+        return ['months' => $months, 'timeline' => $timeline,
+            'change_percentage' => $months[0]['change_percentage'] ?? null];
     }
 
     private function getTimelinePage(array $event): array {
@@ -828,11 +799,11 @@ class CControllerAnalistProblemPopup extends CController {
         return $host;
     }
 
-    private function getPatternTimeline(array $event): array {
-        $period = $this->getInput('pattern_period', '12');
+    private function getCalendarTimeline(array $event, string $prefix = 'pattern', string $default = '12'): array {
+        $period = $this->getInput($prefix.'_period', $default);
         if ($period === 'custom') {
-            $from = $this->getInput('pattern_from');
-            $to = $this->getInput('pattern_to');
+            $from = $this->getInput($prefix.'_from');
+            $to = $this->getInput($prefix.'_to');
             $parser = new CRangeTimeParser();
             if ($parser->parse($from) !== CParser::PARSE_SUCCESS) throw new \RuntimeException(_('Invalid start time.'));
             $from_ts = $parser->getDateTime(true)->getTimestamp();
@@ -846,10 +817,11 @@ class CControllerAnalistProblemPopup extends CController {
             }
         }
         else {
-            // Include the selected event's month and the preceding calendar months, as before.
+            // Include the event's month: comparisons use the full month; patterns end at problem start.
             $to_ts = (int) $event['clock'];
             $month_start = strtotime(date('Y-m-01 00:00:00', $to_ts));
             $from_ts = max(0, strtotime('-'.((int) $period - 1).' months', $month_start));
+            if ($prefix === 'comparison') $to_ts = strtotime('+1 month', $month_start) - 1;
             $from = date(ZBX_FULL_DATE_TIME, $from_ts);
             $to = date(ZBX_FULL_DATE_TIME, $to_ts);
         }

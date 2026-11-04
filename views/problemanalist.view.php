@@ -36,6 +36,11 @@ if ($active_tab === 'timeline_events') {
     return;
 }
 
+if ($active_tab === 'monthly') {
+    echo json_encode(['body' => createMonthlyComparisonSection($monthly_comparison)->toString()]);
+    return;
+}
+
 if ($active_tab === 'history') {
     $rows = createAnalistHistoryRows($data['history_values'], $data['history_item']);
     echo json_encode([
@@ -349,6 +354,39 @@ function createOperationalDataSection(array $operational_data): CDiv {
     return $section;
 }
 
+/** Share native period selects, date selectors and form markup between historical summaries. */
+function createAnalistCalendarControls(array $timeline, string $prefix): CForm {
+    $id = uniqid('analist-'.$prefix.'-');
+    $options = ['1' => _('1 month'), '3' => _('3 months'), '6' => _('6 months'),
+        '12' => _('12 months'), 'custom' => _('Custom period')];
+    if ($prefix === 'comparison') unset($options['1']);
+    $period = (new CSelect($prefix.'_period'))->setId($id.'-period')
+        ->setFocusableElementId($id.'-period-focus')->setValue($timeline['period'])
+        ->setAttribute('data-'.$prefix.'-period', '')->addOptions(CSelect::createOptionsFromArray($options));
+    $apply = (new CSubmit('apply_'.$prefix, _('Apply')))->setId($id.'-apply')
+        ->setAttribute('data-'.$prefix.'-apply', '');
+    $range = (new CDiv([
+        new CLabel(_('From'), $id.'_from'),
+        (new CDateSelector($id.'_from', $timeline['from']))->setDateFormat(ZBX_FULL_DATE_TIME)
+            ->setAriaRequired(true)->setAttribute('data-'.$prefix.'-from', ''),
+        new CLabel(_('To'), $id.'_to'),
+        (new CDateSelector($id.'_to', $timeline['to']))->setDateFormat(ZBX_FULL_DATE_TIME)
+            ->setAriaRequired(true)->setAttribute('data-'.$prefix.'-to', '')
+    ]))->addClass('analist-calendar-custom-range')->setAttribute('data-'.$prefix.'-custom-range', '');
+    if ($timeline['period'] !== 'custom') {
+        $apply->setAttribute('hidden', 'hidden');
+        $range->setAttribute('hidden', 'hidden');
+    }
+    return (new CForm('get', 'zabbix.php'))->setName($id)->addClass('analist-calendar-controls')
+        ->setAttribute('data-'.$prefix.'-controls', '')->addItem([
+            (new CDiv([new CLabel(_('Period'), $period->getFocusableElementId()), $period, $apply]))
+                ->addClass('analist-calendar-toolbar'),
+            $range,
+            (new CTag('p', true))->addClass('analist-calendar-message')->setAttribute('data-'.$prefix.'-message', '')
+                ->setAttribute('role', 'alert')
+        ]);
+}
+
 function createMonthlyComparisonSection(array $monthly_comparison): ?CDiv {
     if (empty($monthly_comparison)) {
         return null;
@@ -356,19 +394,16 @@ function createMonthlyComparisonSection(array $monthly_comparison): ?CDiv {
 
     $section = (new CDiv())->addClass('monthly-comparison-section');
     $section->addItem(new CTag('h4', false, _('Monthly Comparison')));
-
-    $months = [];
-
-    if (!empty($monthly_comparison['months'])) {
-        $months = array_reverse($monthly_comparison['months']);
-    }
-    elseif (!empty($monthly_comparison['current_month'])) {
-        $months = [
-            $monthly_comparison['previous_month'],
-            $monthly_comparison['current_month']
-        ];
+    if (isset($monthly_comparison['timeline'])) {
+        $timeline = $monthly_comparison['timeline'];
+        $section->addItem(createAnalistCalendarControls($timeline, 'comparison'));
+        $section->addItem((new CTag('p', true,
+            zbx_date2str(DATE_TIME_FORMAT_SECONDS, $timeline['from_ts']).' – '
+                .zbx_date2str(DATE_TIME_FORMAT_SECONDS, $timeline['to_ts']).' · '.date_default_timezone_get()
+        ))->addClass('mnz-drilldown-hint'));
     }
 
+    $months = array_reverse($monthly_comparison['months'] ?? []);
     if (!$months) {
         return $section;
     }
@@ -672,7 +707,7 @@ if ($active_tab === 'timeline') {
 
 $timeline_comparison_section = createMonthlyComparisonSection($monthly_comparison);
 if ($timeline_comparison_section !== null) {
-    $timeline_div->addItem($timeline_comparison_section);
+    $timeline_div->addItem((new CDiv($timeline_comparison_section))->setAttribute('data-monthly-comparison', ''));
 }
 
 $page = $data['timeline_page'] ?? ['events' => [], 'has_more' => false, 'cursor' => null];

@@ -109,6 +109,23 @@ $validate(array_replace($pattern_request, ['pattern_from' => 'invalid']), false)
 foreach (['1', '3', '6', '12'] as $preset) {
     $validate(['eventid' => '1', 'tab' => 'patterns', 'pattern_period' => $preset], true);
 }
+foreach (['timeline', 'monthly'] as $tab) {
+    foreach (['3', '6', '12'] as $preset) {
+        $validate(['eventid' => '1', 'tab' => $tab, 'comparison_period' => $preset], true);
+    }
+    $custom = ['eventid' => '1', 'tab' => $tab, 'comparison_period' => 'custom',
+        'comparison_from' => 'now-3M', 'comparison_to' => 'now'];
+    if ($validate($custom, true)['comparison_from'] !== 'now-3M') {
+        throw new RuntimeException('Comparison dates must survive the native controller lifecycle.');
+    }
+    foreach (['comparison_from', 'comparison_to'] as $required) {
+        $invalid = $custom;
+        unset($invalid[$required]);
+        $validate($invalid, false);
+    }
+    $validate(array_replace($custom, ['comparison_from' => 'invalid']), false);
+    $validate(array_replace($custom, ['comparison_period' => '1']), false);
+}
 
 $settings = new ReflectionProperty(CSettingsHelper::class, 'params');
 $settings->setAccessible(true);
@@ -149,7 +166,7 @@ foreach ([['now', 'now-1h'], ['now-10s', 'now'], ['now-3y', 'now']] as [$from, $
     throw new RuntimeException('Invalid graph periods must respect native minimum and maximum limits');
 }
 
-$pattern_method = $controller_class->getMethod('getPatternTimeline');
+$pattern_method = $controller_class->getMethod('getCalendarTimeline');
 $pattern_method->setAccessible(true);
 $pattern_range = static function (array $options, string $date) use ($controller_class, $validated_input, $pattern_method): array {
     $controller = $controller_class->newInstanceWithoutConstructor();
@@ -171,6 +188,15 @@ foreach ([['2026-03-31', '2026-03-01'], ['2020-01-01', '2026-01-01']] as [$from,
     try { $pattern_range(['pattern_period' => 'custom', 'pattern_from' => $from, 'pattern_to' => $to], '2026-03-31'); }
     catch (RuntimeException $exception) { continue; }
     throw new RuntimeException('Reversed or excessive custom pattern ranges must be rejected');
+}
+
+foreach (['3' => '2026-01-01', '6' => '2025-10-01', '12' => '2025-04-01'] as $preset => $start) {
+    $controller = $controller_class->newInstanceWithoutConstructor();
+    $validated_input->setValue($controller, ['comparison_period' => (string) $preset]);
+    $range = $pattern_method->invoke($controller, ['clock' => strtotime('2026-03-15 12:00:00')], 'comparison', '6');
+    if ($range['from_ts'] !== strtotime($start) || $range['to_ts'] !== strtotime('2026-03-31 23:59:59')) {
+        throw new RuntimeException('Monthly comparisons must retain complete calendar months across DST.');
+    }
 }
 
 echo "Native input validation checks passed.\n";

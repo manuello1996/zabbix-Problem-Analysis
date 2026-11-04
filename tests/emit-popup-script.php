@@ -165,6 +165,12 @@ if (in_array($scenario, ['timeline-page', 'timeline-more-page', 'timeline-final-
 $last_timeline_event = $timeline_events ? $timeline_events[count($timeline_events) - 1] : null;
 $pattern_timeline = ['period' => '12', 'from' => '2025-04-01 00:00:00', 'to' => '2026-03-31 12:00:00',
     'from_ts' => strtotime('2025-04-01 00:00:00'), 'to_ts' => $event['clock']];
+$comparison_timeline = ['period' => '6', 'from' => '2025-10-01 00:00:00', 'to' => '2026-03-31 23:59:59',
+    'from_ts' => strtotime('2025-10-01 00:00:00'), 'to_ts' => strtotime('2026-03-31 23:59:59')];
+if ($scenario === 'comparison-custom') {
+    $comparison_timeline = ['period' => 'custom', 'from' => '2026-03-15 00:00:00', 'to' => '2026-03-31 12:00:00',
+        'from_ts' => strtotime('2026-03-15 00:00:00'), 'to_ts' => $event['clock']];
+}
 if (in_array($scenario, ['patterns-custom', 'patterns-rich'])) {
     $pattern_timeline = ['period' => 'custom', 'from' => '2026-02-01 00:00:00', 'to' => '2026-03-31 12:00:00',
         'from_ts' => strtotime('2026-02-01 00:00:00'), 'to_ts' => $event['clock']];
@@ -204,7 +210,8 @@ $view = new CView('problemanalist.view', [
         'has_more' => $timeline_events && $scenario !== 'timeline-final-page',
         'cursor' => $last_timeline_event
             ? ['eventid' => $last_timeline_event['eventid'], 'clock' => $last_timeline_event['clock'], 'group' => 'problem'] : null],
-    'monthly_comparison' => ['months' => [['name' => 'March 2026', 'count' => 1, 'change_percentage' => 0]]]
+    'monthly_comparison' => ['months' => [['name' => 'March 2026', 'count' => 1, 'change_percentage' => 0]],
+        'timeline' => $comparison_timeline]
 ]);
 $response = json_decode($view->getOutput(), true, 512, JSON_THROW_ON_ERROR);
 // Resolve the actual emitted image URLs using the same native helper as chart.php.

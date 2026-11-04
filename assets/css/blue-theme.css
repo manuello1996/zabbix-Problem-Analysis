@@ -1123,15 +1123,16 @@ td:has(.js-lts-button-widget) {
 
 /* Preserve the original Time Patterns appearance with accessible controls. */
 .analist-patterns [hidden] { display: none !important; }
-.analist-pattern-toolbar,
-.analist-pattern-custom-range:not([hidden]) {
+.analist-calendar-toolbar,
+.analist-calendar-custom-range:not([hidden]) {
     display: flex;
     align-items: center;
     flex-wrap: wrap;
     gap: 10px;
 }
-.analist-pattern-custom-range { margin-top: 12px; }
-.analist-patterns [data-pattern-message]:empty { display: none; }
+.analist-calendar-custom-range { margin-top: 12px; }
+.analist-calendar-controls [hidden],
+.analist-calendar-message:empty { display: none; }
 .analist-patterns [data-pattern-filter]:not([hidden]) { display: flex; }
 .analist-patterns [data-pattern-days]:not([hidden]) { display: block; }
 .analist-patterns button.mnz-heatmap-cell,

@@ -207,6 +207,10 @@ def verify(zabbix):
         assert ids == [entry["eventid"] for entry in sorted(matching, key=timeline_order)], ("Timeline order", name)
         oldest = min(matching, key=lambda entry: int(entry["eventid"]))
         assert load_timeline(oldest)[1] == ids, ("Older problem must include newer occurrences", name)
+        for period in ['3', '6', '12']:
+            summary = zabbix.tab(event["eventid"], 'monthly', comparison_period=period)
+            assert Timeline(summary['body']).monthly_count == count, ("Monthly period", name, period)
+            assert 'data-timeline-event' not in summary['body'], "Period changes must return only the comparison"
         patterns = zabbix.tab(event["eventid"], "patterns")
         assert patterns["pattern_data"]["total"] == count, ("Patterns", name, patterns)
         print(f"Verified {name}: Recurrences={count}, Timeline={len(ids)}, Monthly Comparison={count}, Time Patterns={count}")

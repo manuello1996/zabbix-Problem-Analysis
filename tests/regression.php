@@ -4,6 +4,7 @@ if (PHP_SAPI !== 'cli') { http_response_code(404); exit; }
 $ui_root = getenv('ZABBIX_UI_ROOT') ?: dirname(__DIR__, 3);
 require $ui_root.'/include/defines.inc.php';
 require $ui_root.'/include/gettextwrapper.inc.php';
+require $ui_root.'/include/func.inc.php';
 require $ui_root.'/include/classes/validators/CApiInputValidator.php';
 require $ui_root.'/include/classes/helpers/CArrayHelper.php';
 require $ui_root.'/include/classes/helpers/CRoleHelper.php';
@@ -81,6 +82,14 @@ class ApiFixture {
                     return !empty($options['preservekeys']) ? array_column($events, null, 'eventid') : $events;
                 }
                 if (!empty($options['countOutput'])) {
+                    if (empty($options['groupBy'])) {
+                        if (API::$history === false) return false;
+                        return (string) count(array_filter(API::$history, static function ($event) use ($options) {
+                            return $event['objectid'] === $options['objectids']
+                                && $event['name'] === $options['filter']['name']
+                                && $event['clock'] >= $options['time_from'] && $event['clock'] <= $options['time_till'];
+                        }));
+                    }
                     return API::$recurrence_counts[$options['filter']['name']] ?? API::$recurrence_counts;
                 }
                 if (isset($options['eventids']) && API::$recurrence_events !== null) {
@@ -411,7 +420,10 @@ foreach (['patterns', 'timeline'] as $tab) {
     $ranges = array_filter(API::$calls, static function ($call) {
         return $call[0] === 'event' && isset($call[1]['time_from']);
     });
-    check(count($ranges) === 1, 'Each historical tab must request only its own range');
+    check(count($ranges) > 0 && ($tab !== 'patterns' || count($ranges) === 1),
+        'Each historical tab must request only its own range');
+    check($tab !== 'timeline' || !array_filter($ranges, static function ($call) { return empty($call[1]['countOutput']); }),
+        'Monthly comparison uses count-only queries rather than transferring all event timestamps');
     check(array_values($ranges)[0][1]['filter'] === ['name' => API::$event['name']],
         'Patterns and monthly comparisons share exact event-name filtering');
     check(!array_filter(API::$calls, static function ($call) { return $call[0] === 'trigger'; }),
@@ -424,6 +436,56 @@ foreach (['patterns', 'timeline'] as $tab) {
     check(isset(json_decode($failed->response->getData()['main_block'], true)['error']), 'Range failures must remain retryable errors');
     API::$history = [];
 }
+// Monthly summaries transfer counts only and changing their period skips Timeline pagination.
+$saved_event = API::$event;
+$comparison_timezone = date_default_timezone_get();
+date_default_timezone_set('Europe/Zurich');
+API::$event['clock'] = strtotime('2026-03-15 12:00:00');
+foreach (['3', '6', '12'] as $period) {
+    API::$calls = [];
+    $monthly = new ProblemControllerFixture(['eventid' => '1', 'tab' => 'monthly', 'comparison_period' => $period]);
+    $monthly->run();
+    $comparison = $monthly->response->getData()['monthly_comparison'];
+    check(count($comparison['months']) === (int) $period && count(API::$calls) === (int) $period + 1,
+        'Monthly summaries issue one aggregate query per displayed month plus the permission-checked event lookup');
+    foreach (array_slice(API::$calls, 1) as [$kind, $query]) {
+        check($kind === 'event' && $query['countOutput'] && !isset($query['output'], $query['sortfield'])
+            && $query['filter'] === ['name' => API::$event['name']] && $query['objectids'] === '7',
+            'Summary requests do not load event rows, action history, triggers or other tabs');
+    }
+}
+$custom_dates = ['2026-01-14 23:59:59', '2026-01-15 00:00:00', '2026-01-31 23:59:59',
+    '2026-03-01 00:00:00', '2026-03-29 01:30:00', '2026-03-29 03:30:00', '2026-03-29 03:30:01'];
+API::$history = array_map(static function ($date) {
+    return ['objectid' => '7', 'name' => API::$event['name'], 'clock' => strtotime($date)];
+}, $custom_dates);
+API::$history[] = ['objectid' => '7', 'name' => API::$event['name'].' another ID', 'clock' => strtotime('2026-03-01')];
+API::$history[] = ['objectid' => '8', 'name' => API::$event['name'], 'clock' => strtotime('2026-03-01')];
+$custom_monthly = ['eventid' => '1', 'tab' => 'monthly', 'comparison_period' => 'custom',
+    'comparison_from' => '2026-01-15 00:00:00', 'comparison_to' => '2026-03-29 03:30:00'];
+API::$calls = [];
+$monthly = new ProblemControllerFixture($custom_monthly);
+$monthly->run();
+$comparison = $monthly->response->getData()['monthly_comparison'];
+check(array_column($comparison['months'], 'count') === [3, 0, 2]
+    && array_column($comparison['months'], 'change_percentage') === [100.0, -100.0, null],
+    'Custom periods clip boundary months, retain empty months, exclude other identities and compute changes');
+check(API::$calls[1][1]['time_from'] === strtotime($custom_monthly['comparison_from'])
+    && API::$calls[3][1]['time_till'] === strtotime($custom_monthly['comparison_to'])
+    && API::$calls[2][1]['time_till'] + 1 === API::$calls[3][1]['time_from'],
+    'Inclusive monthly ranges have no gaps or overlaps across the frontend DST transition');
+foreach ([['now', 'now-1d'], ['now-3y', 'now']] as [$from, $to]) {
+    API::$calls = [];
+    $monthly = new ProblemControllerFixture(array_replace($custom_monthly,
+        ['comparison_from' => $from, 'comparison_to' => $to]));
+    $monthly->run();
+    check(isset(json_decode($monthly->response->getData()['main_block'], true)['error']) && count(API::$calls) === 1,
+        'Invalid comparison periods fail before aggregate queries are issued');
+}
+API::$event = $saved_event;
+API::$history = [];
+date_default_timezone_set($comparison_timezone);
+
 // Graph rendering must not request item last values, value maps or expanded expressions.
 API::$trigger = ['triggerid' => '7', 'hosts' => [], 'items' => [['itemid' => '10']]];
 API::$calls = [];

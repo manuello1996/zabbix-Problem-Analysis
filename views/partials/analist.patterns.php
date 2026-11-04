@@ -26,33 +26,7 @@ $time_patterns_div->addClass('analist-patterns patterns-d3-container')->setAttri
 $time_patterns_div->addItem((new CDiv(new CTag('h6', true,
     _('Overview based on the time of day and weekday of the same problem. Occurrences are listed in Timeline.'))))
     ->addClass('pattern-chart-container')->addStyle('margin-bottom:5px'));
-$period = (new CSelect('pattern_period'))->setId($pattern_id.'-period')
-    ->setFocusableElementId($pattern_id.'-period-focus')->setValue($timeline['period'])
-    ->setAttribute('data-pattern-period', '')->addOptions(CSelect::createOptionsFromArray([
-        '1' => _('1 month'), '3' => _('3 months'), '6' => _('6 months'), '12' => _('12 months'),
-        'custom' => _('Custom period')
-    ]));
-$apply = (new CSubmit('apply_patterns', _('Apply')))->setId($pattern_id.'-apply')
-    ->setAttribute('data-pattern-apply', '');
-$custom_range = (new CDiv([
-    new CLabel(_('From'), $pattern_id.'_from'),
-    (new CDateSelector($pattern_id.'_from', $timeline['from']))->setDateFormat(ZBX_FULL_DATE_TIME)
-        ->setAriaRequired(true)->setAttribute('data-pattern-from', ''),
-    new CLabel(_('To'), $pattern_id.'_to'),
-    (new CDateSelector($pattern_id.'_to', $timeline['to']))->setDateFormat(ZBX_FULL_DATE_TIME)
-        ->setAriaRequired(true)->setAttribute('data-pattern-to', '')
-]))->addClass('analist-pattern-custom-range')->setAttribute('data-pattern-custom-range', '');
-if ($timeline['period'] !== 'custom') {
-    $apply->setAttribute('hidden', 'hidden');
-    $custom_range->setAttribute('hidden', 'hidden');
-}
-$time_patterns_div->addItem((new CForm('get', 'zabbix.php'))->setName($pattern_id)
-    ->setAttribute('data-pattern-controls', '')->addItem([
-        (new CDiv([new CLabel(_('Period'), $period->getFocusableElementId()), $period, $apply]))
-            ->addClass('analist-pattern-toolbar'),
-        $custom_range,
-        (new CTag('p', true))->setAttribute('data-pattern-message', '')->setAttribute('role', 'alert')
-    ]));
+$time_patterns_div->addItem(createAnalistCalendarControls($timeline, 'pattern'));
 $time_patterns_div->addItem((new CTag('p', true, [
     zbx_date2str(DATE_TIME_FORMAT_SECONDS, $timeline['from_ts']).' – '
         .zbx_date2str(DATE_TIME_FORMAT_SECONDS, $timeline['to_ts']).' · '.date_default_timezone_get(),

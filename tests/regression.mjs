@@ -38,6 +38,19 @@ export async function runRegression(fixture, asset, popupAsset, fragments = {}, 
         assert.equal(fragment.response.body.includes('chart.php'), tab === 'graphs');
         assert.equal(fragment.inline, '', 'Lazy fragments must not mount additional popup instances');
     }
+    if (fragments.timeline) {
+        const {body} = fragments.timeline.response;
+        assert(body.includes('data-monthly-comparison=""') && body.includes('data-comparison-controls=""'));
+        assert(body.includes('<z-select') && body.includes('toggleCalendar('), 'Comparison reuses native period controls');
+        assert(!body.includes('1 month'), 'Monthly Comparison offers only 3, 6 and 12 months plus Custom');
+        assert(body.match(/<button[^>]*data-comparison-apply=""[^>]*>/)[0].includes('hidden="hidden"'));
+    }
+    if (actionFixtures['comparison-custom']) {
+        const {body} = actionFixtures['comparison-custom'].response;
+        assert(!body.includes('data-timeline-table') && !body.includes('Recent Events'),
+            'Comparison-only responses do not render or refetch the event list');
+        assert(!body.match(/<button[^>]*data-comparison-apply=""[^>]*>/)[0].includes('hidden="hidden"'));
+    }
     if (fragments.patterns) {
         const {body, pattern_data: data} = fragments.patterns.response;
         assert.equal(data.total, 1);
@@ -926,7 +939,7 @@ export async function runRegression(fixture, asset, popupAsset, fragments = {}, 
     loading = patternPopup.activateTab('patterns');
     pending[index].resolve(patternResponse); await loading;
     const patternForm = new Panel(''); patternForm.popupRoot = patternRoot;
-    patternForm.matches = selector => selector === '[data-pattern-controls]';
+    patternForm.matches = selector => selector.includes('[data-pattern-controls]');
     const patternPeriod = {value: '12', disabled: false,
         matches: selector => selector.includes('[data-pattern-period]'), closest: () => patternForm};
     const patternCustom = {hidden: true}, patternApply = {disabled: false, hidden: true};
@@ -999,6 +1012,77 @@ export async function runRegression(fixture, asset, popupAsset, fragments = {}, 
     patternLoading = patternPopup.updatePatterns(patternForm);
     patternRoot.dialogue.dispatch('dialogue.close'); await patternLoading;
     assert(pending[index].options.signal.aborted && patternPopup.patternRequest === null);
+
+    const comparisonRoot = popupRoot(); roots.set('comparison-controls', comparisonRoot);
+    const comparisonPopup = Popup.mount({...config, rootId: 'comparison-controls'});
+    index = pending.length;
+    loading = comparisonPopup.activateTab('timeline');
+    pending[index].resolve(fragments.timeline.response); await loading;
+    const comparisonSection = new Panel(''); comparisonSection.popupRoot = comparisonRoot;
+    const comparisonForm = new Panel(''); comparisonForm.popupRoot = comparisonRoot;
+    comparisonForm.matches = selector => selector.includes('[data-comparison-controls]');
+    comparisonForm.closest = selector => selector === '[data-monthly-comparison]' ? comparisonSection : null;
+    const comparisonPeriod = {value: '6', disabled: false,
+        matches: selector => selector.includes('[data-comparison-period]'), closest: () => comparisonForm};
+    const comparisonRange = {hidden: true}, comparisonApply = {hidden: true, disabled: false};
+    const comparisonMessage = {textContent: ''};
+    const comparisonFields = {'[name="comparison_period"]': comparisonPeriod,
+        '[data-comparison-custom-range]': comparisonRange, '[type="submit"]': comparisonApply,
+        '[data-comparison-from] input': {value: 'now-3M'}, '[data-comparison-to] input': {value: 'now'},
+        '[data-comparison-message]': comparisonMessage};
+    comparisonForm.querySelector = selector => comparisonFields[selector];
+    const timelineMarkup = comparisonPopup.panels.get('timeline').innerHTML;
+    const comparisonBody = actionFixtures['comparison-custom']?.response.body || 'Updated comparison';
+    for (const period of ['3', '6', '12']) {
+        index = pending.length;
+        comparisonPeriod.value = period;
+        comparisonRoot.dispatch('change', {target: comparisonPeriod});
+        const applying = comparisonPopup.comparisonRequest;
+        assert(applying && comparisonApply.hidden && comparisonRange.hidden);
+        assert.equal(pending[index].options.body.get('tab'), 'monthly', 'Period changes request only the summary');
+        assert.equal(pending[index].options.body.get('comparison_period'), period);
+        assert.equal(comparisonPopup.updatePeriod(comparisonForm, 'timeline', 'comparison'), applying,
+            'Repeated submissions reuse the pending comparison request');
+        assert(comparisonPeriod.disabled && !comparisonRoot.cancelButton.disabled);
+        pending[index].resolve({body: comparisonBody}); await applying;
+        assert.equal(comparisonSection.innerHTML, comparisonBody);
+        assert.equal(comparisonPopup.panels.get('timeline').innerHTML, timelineMarkup,
+            'Period changes preserve the event list and previously appended pages');
+        assert(!comparisonPeriod.disabled && !comparisonApply.disabled);
+    }
+    index = pending.length;
+    comparisonPeriod.value = 'custom';
+    comparisonRoot.dispatch('change', {target: comparisonPeriod});
+    assert.equal(pending.length, index, 'Custom comparison waits for Apply');
+    assert(!comparisonApply.hidden && !comparisonRange.hidden);
+    comparisonRoot.dispatch('submit', {target: comparisonForm, preventDefault() {}, stopPropagation() {}});
+    let comparisonLoading = comparisonPopup.comparisonRequest;
+    assert.equal(pending[index].options.body.get('comparison_from'), 'now-3M');
+    assert.equal(pending[index].options.body.get('comparison_to'), 'now');
+    pending[index].resolve({error: {messages: ['Invalid comparison period']}}); await comparisonLoading;
+    assert.equal(comparisonMessage.textContent, 'Invalid comparison period');
+    assert.equal(comparisonSection.innerHTML, comparisonBody, 'Invalid ranges retain the current summary');
+    index = pending.length;
+    comparisonLoading = comparisonPopup.updatePeriod(comparisonForm, 'timeline', 'comparison');
+    await comparisonPopup.activateTab('overview');
+    pending[index].resolve({body: comparisonBody}); await comparisonLoading;
+    assert.equal(comparisonPopup.activeTab, 'overview', 'A late comparison response preserves the active tab');
+    await comparisonPopup.activateTab('timeline');
+    index = pending.length;
+    reloading = comparisonPopup.refreshTab();
+    assert.equal(pending[index].options.body.get('comparison_period'), 'custom');
+    assert.equal(pending[index].options.body.get('comparison_from'), 'now-3M', 'Refresh retains the active comparison period');
+    pending[index].resolve(fragments.timeline.response); await reloading;
+    index = pending.length;
+    comparisonLoading = comparisonPopup.updatePeriod(comparisonForm, 'timeline', 'comparison');
+    reloading = comparisonPopup.refreshTab(); await comparisonLoading;
+    assert(pending[index].options.signal.aborted && comparisonPopup.comparisonRequest === null,
+        'Refresh cancels pending comparison changes');
+    pending[index + 1].resolve(fragments.timeline.response); await reloading;
+    index = pending.length;
+    comparisonLoading = comparisonPopup.updatePeriod(comparisonForm, 'timeline', 'comparison');
+    comparisonRoot.dialogue.dispatch('dialogue.close'); await comparisonLoading;
+    assert(pending[index].options.signal.aborted && comparisonPopup.comparisonRequest === null);
 
     const graphRoot = popupRoot(); roots.set('graph-controls', graphRoot);
     const graphPopup = Popup.mount({...config, rootId: 'graph-controls'});
@@ -1307,6 +1391,7 @@ if (typeof process !== 'undefined' && process.argv[1] && path.resolve(process.ar
     actionFixtures['timeline-page'] = render('timeline', 'timeline-page');
     actionFixtures['timeline-more-page'] = render('timeline_events', 'timeline-more-page');
     actionFixtures['timeline-final-page'] = render('timeline_events', 'timeline-final-page');
+    actionFixtures['comparison-custom'] = render('monthly', 'comparison-custom');
     for (const scenario of ['patterns-rich', 'patterns-empty', 'patterns-custom', 'patterns-short']) {
         actionFixtures[scenario] = render('patterns', scenario);
     }

@@ -364,6 +364,8 @@
             this.graphRequest = null;
             this.patternOptions = {};
             this.patternRequest = null;
+            this.comparisonOptions = {};
+            this.comparisonRequest = null;
             this.timelineRequest = null;
             root.addEventListener('click', event => this.onClick(event), {signal: this.lifecycle.signal});
             root.addEventListener('keydown', event => this.onKeyDown(event), {signal: this.lifecycle.signal});
@@ -371,13 +373,14 @@
                 if (event.target.matches('[data-services-search]')) this.serviceUi.filterServices(event.target.value);
             }, {signal: this.lifecycle.signal});
             root.addEventListener('change', event => {
-                if (event.target.matches('[data-pattern-period]')) {
-                    const form = event.target.closest('[data-pattern-controls]');
+                if (event.target.matches('[data-pattern-period], [data-comparison-period]')) {
+                    const prefix = event.target.matches('[data-comparison-period]') ? 'comparison' : 'pattern';
+                    const form = event.target.closest('[data-' + prefix + '-controls]');
                     const custom = event.target.value === 'custom';
-                    form.querySelector('[data-pattern-custom-range]').hidden = !custom;
+                    form.querySelector('[data-' + prefix + '-custom-range]').hidden = !custom;
                     form.querySelector('[type="submit"]').hidden = !custom;
                     this.scheduleLayout();
-                    if (!custom) this.updatePatterns(form);
+                    if (!custom) this.updatePeriod(form, prefix === 'comparison' ? 'timeline' : 'patterns', prefix);
                     return;
                 }
                 if (!event.target.matches('[data-graph-period], [data-graph-layout]')) return;
@@ -391,10 +394,11 @@
                 if (!custom || event.target.matches('[data-graph-layout]')) this.updateGraphs(form);
             }, {signal: this.lifecycle.signal});
             root.addEventListener('submit', event => {
-                if (event.target.matches('[data-pattern-controls]')) {
+                if (event.target.matches('[data-pattern-controls], [data-comparison-controls]')) {
                     event.preventDefault();
                     event.stopPropagation();
-                    this.updatePatterns(event.target);
+                    const prefix = event.target.matches('[data-comparison-controls]') ? 'comparison' : 'pattern';
+                    this.updatePeriod(event.target, prefix === 'comparison' ? 'timeline' : 'patterns', prefix);
                     return;
                 }
                 if (!event.target.matches('[data-graph-controls]')) return;
@@ -562,6 +566,8 @@
             this.timelineRequest = null;
             if (this.activeTab !== 'graphs') this.graphOptions = {};
             if (this.activeTab !== 'patterns') this.patternOptions = {};
+            if (this.activeTab !== 'timeline') this.comparisonOptions = {};
+            this.comparisonRequest = null;
             this.patternRequest = null;
             this.graphRequest = null;
             if (this.recoveryTimer !== null) window.clearTimeout(this.recoveryTimer);
@@ -614,6 +620,7 @@
             }
             if (key === 'graphs') Object.assign(params, this.graphOptions);
             if (key === 'patterns') Object.assign(params, this.patternOptions);
+            if (key === 'timeline') Object.assign(params, this.comparisonOptions);
             state.promise = this.fetchJson(action, params).then(result => {
                 if (this.closed || this.tabs.get(key) !== state) return;
                 this.renderTab(key, result);
@@ -696,6 +703,7 @@
                 options[prefix + '_to'] = form.querySelector('[data-' + prefix + '-to] input').value;
             }
             const version = this.dataVersion, state = this.tabs.get(key);
+            const comparison = prefix === 'comparison' ? form.closest('[data-monthly-comparison]') : null;
             const submit = form.querySelector('[type="submit"]');
             const message = form.querySelector('[data-' + prefix + '-message]');
             const selects = [period, layout].filter(Boolean);
@@ -705,11 +713,15 @@
             selects.forEach(select => { select.disabled = true; });
             form.setAttribute('aria-busy', 'true');
             const request = this.fetchJson('problemanalist.tab.get', {
-                eventid: this.config.eventData.eventid, tab: key, ...options,
+                eventid: this.config.eventData.eventid, tab: comparison ? 'monthly' : key, ...options,
                 ...(this.config.eventData.hostid ? {hostid: this.config.eventData.hostid} : {})
             }).then(result => {
                 if (this.closed || version !== this.dataVersion || this.tabs.get(key) !== state) return;
-                this.renderTab(key, result);
+                if (comparison) {
+                    if (!this.root.contains(comparison)) return;
+                    if (typeof result.body !== 'string') throw new Error('Invalid monthly comparison response');
+                    comparison.innerHTML = result.body;
+                } else this.renderTab(key, result);
                 this[prefix + 'Options'] = options;
                 this.scheduleLayout();
             }).catch(error => {
@@ -961,6 +973,8 @@
             this.timelineRequest = null;
             this.patternRequest = null;
             this.patternOptions = {};
+            this.comparisonRequest = null;
+            this.comparisonOptions = {};
             this.patternRenderer?.destroy();
             this.patternRenderer = null;
             AnalistProblemPopup.instances.delete(this);
