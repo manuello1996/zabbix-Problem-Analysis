@@ -147,7 +147,7 @@ class CControllerAnalistProblemPopup extends CController {
         if ($tab === 'timeline_events') {
             try {
                 $this->setResponse(new CControllerResponseData([
-                    'tab' => $tab, 'timeline_page' => $this->getTimelinePage($event)
+                    'tab' => $tab, 'event' => $event, 'timeline_page' => $this->getTimelinePage($event)
                 ]));
             }
             catch (\Exception $exception) {
@@ -496,7 +496,6 @@ class CControllerAnalistProblemPopup extends CController {
     private function getTimelinePage(array $event): array {
         $options = $this->getRelatedEventOptions($event) + [
             'output' => ['eventid', 'clock'],
-            'eventid_till' => $event['eventid'],
             'sortfield' => ['clock', 'eventid'], 'sortorder' => ZBX_SORT_DOWN
         ];
         $read = static function (array $query): array {
@@ -516,7 +515,7 @@ class CControllerAnalistProblemPopup extends CController {
                     || $cursor['name'] !== $event['name']
                     || (int) $cursor['source'] !== EVENT_SOURCE_TRIGGERS
                     || (int) $cursor['object'] !== EVENT_OBJECT_TRIGGER || (int) $cursor['value'] !== TRIGGER_VALUE_TRUE
-                    || (int) $cursor['clock'] !== $before_clock || bccomp($before_id, (string) $event['eventid']) > 0) {
+                    || (int) $cursor['clock'] !== $before_clock) {
                 throw new \RuntimeException(_('Recent event not found or access denied.'));
             }
         }
@@ -526,7 +525,7 @@ class CControllerAnalistProblemPopup extends CController {
         $problem_options = $this->getRelatedEventOptions($event);
         unset($problem_options['value']);
         $problems = API::Problem()->get($problem_options + [
-            'output' => ['eventid', 'clock'], 'eventid_till' => $event['eventid'],
+            'output' => ['eventid', 'clock'],
             'selectAcknowledges' => ['action'], 'recent' => false
         ]);
         if (!is_array($problems)) throw new \RuntimeException(_('Unable to load recent events.'));

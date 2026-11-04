@@ -30,7 +30,7 @@ if ($active_tab === 'timeline_events') {
     $page = $data['timeline_page'];
     echo json_encode([
         'body' => implode('', array_map(static function ($row) { return $row->toString(); },
-            createAnalistTimelineRows($page['events']))),
+            createAnalistTimelineRows($page['events'], (string) $event['eventid']))),
         'has_more' => $page['has_more'], 'cursor' => $page['cursor']
     ]);
     return;
@@ -226,7 +226,7 @@ function createAnalistHistoryRows(array $values, array $item): array {
 }
 
 /** Render paged events with the same native statuses, links and action helpers as make_small_eventlist(). */
-function createAnalistTimelineRows(array $events): array {
+function createAnalistTimelineRows(array $events, string $selected_eventid): array {
     if (!$events) return [];
     $events = array_column($events, null, 'eventid');
     $recovery_ids = array_filter(array_unique(array_column($events, 'r_eventid')));
@@ -269,7 +269,7 @@ function createAnalistTimelineRows(array $events): array {
             ->setAttribute('data-eventid', $event['eventid'])
             ->onClick('acknowledgePopUp({eventids: [this.dataset.eventid]}, this);') : new CSpan(_('Update'));
         $event_url = 'tr_events.php?triggerid='.$event['objectid'].'&eventid='.$event['eventid'];
-        $rows[] = (new CRow([
+        $row = (new CRow([
             (new CLink(zbx_date2str(DATE_TIME_FORMAT_SECONDS, $event['clock']), $event_url))->addClass('action'),
             $resolved ? (new CLink(zbx_date2str(DATE_TIME_FORMAT_SECONDS, $event['r_clock']), $event_url))
                 ->addClass('action') : '',
@@ -277,6 +277,10 @@ function createAnalistTimelineRows(array $events): array {
             $resolved ? zbx_date2age($event['clock'], $event['r_clock']) : zbx_date2age($event['clock']),
             $update, makeEventActionsIcons($event['eventid'], $actions['data'], $users, $acknowledged)
         ]))->setAttribute('data-timeline-event', $event['eventid']);
+        if ((string) $event['eventid'] === $selected_eventid) {
+            $row->addClass('row-selected')->setAttribute('aria-current', 'true');
+        }
+        $rows[] = $row;
     }
     return $rows;
 }
@@ -675,7 +679,7 @@ $page = $data['timeline_page'] ?? ['events' => [], 'has_more' => false, 'cursor'
 $timeline_table = (new CTableInfo())->setHeader([
     _('Time'), _('Recovery time'), _('Status'), _('Age'), _('Duration'), _('Update'), _('Actions')
 ])->setAttribute('data-timeline-table', '');
-foreach (createAnalistTimelineRows($page['events']) as $row) $timeline_table->addRow($row);
+foreach (createAnalistTimelineRows($page['events'], (string) $event['eventid']) as $row) $timeline_table->addRow($row);
 $more = (new CButton(null, _('More')))->addClass('btn-alt')->setAttribute('data-timeline-more', '')
     ->setAttribute('data-before-eventid', $page['cursor']['eventid'] ?? '')
     ->setAttribute('data-before-clock', $page['cursor']['clock'] ?? '')

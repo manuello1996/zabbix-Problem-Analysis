@@ -52,17 +52,20 @@ class ApiFixture {
         switch ($this->kind) {
             case 'event':
                 if (API::$timeline_events !== null && isset($options['limit'], $options['objectids'])) {
-                    $eventid_till = $options['eventid_till'];
-                    $error = '';
-                    check(CApiInputValidator::validate(['type' => API_ID], $eventid_till, '/eventid_till', $error),
-                        'Timeline paging must send a valid native API event ID: '.$error);
+                    if (isset($options['eventid_till'])) {
+                        $eventid_till = $options['eventid_till'];
+                        $error = '';
+                        check(CApiInputValidator::validate(['type' => API_ID], $eventid_till, '/eventid_till', $error),
+                            'Timeline paging must send a valid native API event ID: '.$error);
+                    }
                     if (API::$timeline_events === false) return false;
                     $events = array_values(array_filter(API::$timeline_events, static function ($event) use ($options) {
                         return (string) $event['objectid'] === (string) $options['objectids']
                             && (int) $event['source'] === $options['source'] && (int) $event['object'] === $options['object']
                             && (int) $event['value'] === $options['value']
                             && (!isset($options['filter']['name']) || $event['name'] === $options['filter']['name'])
-                            && bccomp((string) $event['eventid'], (string) $options['eventid_till']) <= 0
+                            && (!isset($options['eventid_till'])
+                                || bccomp((string) $event['eventid'], (string) $options['eventid_till']) <= 0)
                             && (!isset($options['time_from']) || $event['clock'] >= $options['time_from'])
                             && (!isset($options['time_till']) || $event['clock'] <= $options['time_till']);
                     }));
@@ -109,7 +112,8 @@ class ApiFixture {
                     return (string) $event['r_eventid'] === '0'
                         && (string) $event['objectid'] === (string) $options['objectids']
                         && $event['name'] === $options['filter']['name']
-                        && bccomp($event['eventid'], (string) $options['eventid_till']) <= 0;
+                        && (!isset($options['eventid_till'])
+                            || bccomp($event['eventid'], (string) $options['eventid_till']) <= 0);
                 }));
             case 'trigger': return API::$trigger && (empty($options['editable']) || API::$editable) ? [API::$trigger] : [];
             case 'item': return array_values(array_filter(API::$items, static function ($item) use ($options) {
@@ -599,15 +603,18 @@ API::$timeline_events[] = array_replace($timeline_parent,
     ['eventid' => $other_name_id, 'name' => 'Error Notification - ID 10010']);
 $event_page_method = new ReflectionMethod(Modules\AnalistProblem\Actions\CControllerAnalistProblemPopup::class, 'getTimelinePage');
 $event_page_method->setAccessible(true);
-$event_page = static function (?array $cursor = null) use ($timeline_parent, $event_page_method) {
-    $input = ['eventid' => $timeline_parent['eventid'], 'tab' => $cursor ? 'timeline_events' : 'timeline'];
+$event_page = static function (?array $cursor = null, ?array $opened_event = null) use ($timeline_parent, $event_page_method) {
+    $opened_event = $opened_event ?? $timeline_parent;
+    $input = ['eventid' => $opened_event['eventid'], 'tab' => $cursor ? 'timeline_events' : 'timeline'];
     if ($cursor) $input += ['before_eventid' => $cursor['eventid'], 'before_clock' => $cursor['clock']]
         + (isset($cursor['group']) ? ['before_group' => $cursor['group']] : []);
-    return $event_page_method->invoke(new ProblemControllerFixture($input), $timeline_parent);
+    return $event_page_method->invoke(new ProblemControllerFixture($input), $opened_event);
 };
 API::$calls = [];
 $first_page = $event_page();
 check(count($first_page['events']) === 20 && $first_page['has_more'], 'Timeline starts with twenty events and a lookahead');
+check($first_page['events'][0]['eventid'] === $future_id,
+    'Opening an older event still includes matching newer occurrences');
 $detail_queries = array_values(array_filter(API::$calls, static function ($call) {
     return $call[0] === 'event' && isset($call[1]['selectAcknowledges']);
 }));
@@ -617,13 +624,15 @@ check(count($detail_queries) === 1 && count($detail_queries[0][1]['eventids']) =
 $second_page = $event_page($first_page['cursor']);
 $final_page = $event_page($second_page['cursor']);
 check(count($second_page['events']) === 20 && $second_page['has_more'], 'More appends the next twenty events');
-check(count($final_page['events']) === 4 && !$final_page['has_more'], 'The final partial page exhausts More');
-check($final_page['events'][0]['eventid'] === bcsub($timeline_parent['eventid'], '1', 0),
+check(count($final_page['events']) === 5 && !$final_page['has_more'], 'The final partial page exhausts More');
+check($final_page['events'][1]['eventid'] === bcsub($timeline_parent['eventid'], '1', 0),
     'An older timestamp with a larger event ID must not be skipped');
 $loaded_ids = array_column(array_merge($first_page['events'], $second_page['events'], $final_page['events']), 'eventid');
-check(count(array_unique($loaded_ids)) === 44, 'All events load exactly once across a shared timestamp');
+check(count(array_unique($loaded_ids)) === 45, 'All events load exactly once across a shared timestamp');
 check($event_page($final_page['cursor'])['events'] === [], 'An exhausted cursor returns an empty page');
-foreach ([['eventid' => $foreign_id, 'clock' => 100], ['eventid' => $future_id, 'clock' => 100],
+check($event_page(['eventid' => $future_id, 'clock' => 100])['events'][0]['eventid'] === $timeline_parent['eventid'],
+    'More accepts a matching cursor newer than the opened event');
+foreach ([['eventid' => $foreign_id, 'clock' => 100],
         ['eventid' => $other_name_id, 'clock' => 100],
         ['eventid' => $first_page['cursor']['eventid'], 'clock' => 99]] as $bad_cursor) {
     try { $event_page($bad_cursor); }
@@ -640,6 +649,14 @@ check(count($more_controller->response->getData()['timeline_page']['events']) ==
 
 // Priority applies to the complete history, including open events older than the initial page.
 $saved_timeline = API::$timeline_events;
+API::$timeline_events = [];
+for ($number = 1; $number <= 5; $number++) {
+    API::$timeline_events[] = array_replace($timeline_parent, ['eventid' => (string) $number, 'clock' => $number]);
+}
+foreach (API::$timeline_events as $opened_event) {
+    check(array_column($event_page(null, $opened_event)['events'], 'eventid') === ['5', '4', '3', '2', '1'],
+        'Opening any of five matching problems shows all five in newest-first order');
+}
 API::$timeline_events = [];
 for ($number = 0; $number < 48; $number++) {
     API::$timeline_events[] = array_replace($timeline_parent, [
@@ -669,9 +686,10 @@ for ($number = 0; $number < 60; $number++) {
         'r_eventid' => $number % 2 === 0 ? '0' : '2'
     ]);
 }
-$priority_first = $event_page();
-$priority_second = $event_page($priority_first['cursor']);
-$priority_final = $event_page($priority_second['cursor']);
+$oldest_event = API::$timeline_events[59];
+$priority_first = $event_page(null, $oldest_event);
+$priority_second = $event_page($priority_first['cursor'], $oldest_event);
+$priority_final = $event_page($priority_second['cursor'], $oldest_event);
 check($priority_first['cursor']['group'] === 'problem' && $priority_second['cursor']['group'] === 'other',
     'The cursor records the group when crossing the twenty-event boundary');
 $priority_loaded = array_merge($priority_first['events'], $priority_second['events'], $priority_final['events']);

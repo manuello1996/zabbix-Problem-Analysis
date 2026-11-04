@@ -125,6 +125,7 @@ class Timeline(HTMLParser):
     def __init__(self, body):
         super().__init__()
         self.ids, self.row, self.cell = [], [], None
+        self.highlighted = []
         self.more, self.monthly_count = {}, 0
         self.feed(body)
 
@@ -132,6 +133,8 @@ class Timeline(HTMLParser):
         attrs = dict(attrs)
         if "data-timeline-event" in attrs:
             self.ids.append(attrs["data-timeline-event"])
+            if 'row-selected' in attrs.get('class', '').split():
+                self.highlighted.append(attrs['data-timeline-event'])
         if "data-timeline-more" in attrs:
             self.more = {"has_more": "hidden" not in attrs, "cursor": {
                 "eventid": attrs["data-before-eventid"], "clock": attrs["data-before-clock"],
@@ -158,6 +161,18 @@ def verify(zabbix):
     with zabbix.http.open(zabbix.url + "/index.php", login, timeout=15) as response:
         response.read()
     events = zabbix.events()
+    def load_timeline(event):
+        first = Timeline(zabbix.tab(event["eventid"], "timeline")["body"])
+        ids, highlighted, timeline = list(first.ids), list(first.highlighted), first.more
+        while timeline["has_more"]:
+            timeline = zabbix.tab(event["eventid"], "timeline_events", before_eventid=timeline["cursor"]["eventid"],
+                before_clock=timeline["cursor"]["clock"], before_group=timeline["cursor"]["group"])
+            page = Timeline(timeline["body"])
+            ids.extend(page.ids)
+            highlighted.extend(page.highlighted)
+        assert highlighted == [event["eventid"]], ("Selected Timeline event", event["eventid"], highlighted)
+        return first, ids
+
     expected = collections.Counter((event["objectid"], event["name"]) for event in events)
     if len({name for _, name in expected}) < 2:
         raise RuntimeError("Push at least two different log IDs before verifying.")
@@ -180,13 +195,8 @@ def verify(zabbix):
         name = event["name"]
         count = expected[(event["objectid"], name)]
         assert int(counts[event["eventid"]]) == count, ("Recurrences", name, counts)
-        first = Timeline(zabbix.tab(event["eventid"], "timeline")["body"])
+        first, ids = load_timeline(event)
         assert first.monthly_count == count, ("Monthly Comparison", name, first.monthly_count, count)
-        ids, timeline = first.ids, first.more
-        while timeline["has_more"]:
-            timeline = zabbix.tab(event["eventid"], "timeline_events", before_eventid=timeline["cursor"]["eventid"],
-                before_clock=timeline["cursor"]["clock"], before_group=timeline["cursor"]["group"])
-            ids.extend(Timeline(timeline["body"]).ids)
         assert len(ids) == count and len(set(ids)) == count, ("Timeline", name, len(ids), count)
         by_id = {entry["eventid"]: entry for entry in events}
         assert all(by_id[eventid]["name"] == name for eventid in ids), ("Mixed timeline", name)
@@ -195,6 +205,8 @@ def verify(zabbix):
             problem = entry["r_eventid"] == "0" and not any(int(ack["action"]) & 1 for ack in entry["acknowledges"])
             return (not problem, -int(entry["clock"]), -int(entry["eventid"]))
         assert ids == [entry["eventid"] for entry in sorted(matching, key=timeline_order)], ("Timeline order", name)
+        oldest = min(matching, key=lambda entry: int(entry["eventid"]))
+        assert load_timeline(oldest)[1] == ids, ("Older problem must include newer occurrences", name)
         patterns = zabbix.tab(event["eventid"], "patterns")
         assert patterns["pattern_data"]["total"] == count, ("Patterns", name, patterns)
         print(f"Verified {name}: Recurrences={count}, Timeline={len(ids)}, Monthly Comparison={count}, Time Patterns={count}")
