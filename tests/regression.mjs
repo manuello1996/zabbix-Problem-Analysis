@@ -62,6 +62,8 @@ export async function runRegression(fixture, asset, popupAsset, fragments = {}, 
             'The compact original heatmap replaces the native table presentation');
         assert(body.match(/<button[^>]*data-pattern-apply=""[^>]*>/)[0].includes('hidden="hidden"'));
         assert(body.includes('Europe/Zurich') && body.includes('2025-04-01'));
+        assert(body.includes('Period ends now') && !body.includes('Period ends at problem start'),
+            'Pattern presets explain that newer occurrences are included through now');
     }
     if (actionFixtures['patterns-rich']) {
         runPatternChecks(actionFixtures['patterns-rich'], actionFixtures['patterns-empty'], popupAsset);

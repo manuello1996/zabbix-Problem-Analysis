@@ -817,8 +817,9 @@ class CControllerAnalistProblemPopup extends CController {
             }
         }
         else {
-            // Include the event's month: comparisons use the full month; patterns end at problem start.
-            $to_ts = (int) $event['clock'];
+            // Patterns cover recent occurrences, including those raised after the opened event.
+            // Monthly Comparison retains complete calendar months around the event's month.
+            $to_ts = $prefix === 'pattern' ? time() : (int) $event['clock'];
             $month_start = strtotime(date('Y-m-01 00:00:00', $to_ts));
             $from_ts = max(0, strtotime('-'.((int) $period - 1).' months', $month_start));
             if ($prefix === 'comparison') $to_ts = strtotime('+1 month', $month_start) - 1;

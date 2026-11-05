@@ -121,6 +121,30 @@ def push(args, log_id, count):
     print(f"Pushed {count} log values with Windows event ID {log_id}.")
 
 
+class NativeEventList(HTMLParser):
+    def __init__(self, body):
+        super().__init__()
+        self.active, self.eventid, self.ids = False, None, []
+        self.feed(body)
+
+    def handle_starttag(self, tag, attrs):
+        attrs = dict(attrs)
+        if tag == 'section' and attrs.get('id') == 'hat_eventlist':
+            self.active = True
+        if self.active and tag == 'tr':
+            self.eventid = None
+        if self.active and tag == 'a' and self.eventid is None:
+            url = urllib.parse.urlparse(attrs.get('href', ''))
+            if url.path == 'tr_events.php':
+                self.eventid = urllib.parse.parse_qs(url.query)['eventid'][0]
+
+    def handle_endtag(self, tag):
+        if self.active and tag == 'tr' and self.eventid is not None:
+            self.ids.append(self.eventid)
+        if self.active and tag == 'section':
+            self.active = False
+
+
 class Timeline(HTMLParser):
     def __init__(self, body):
         super().__init__()
@@ -161,6 +185,16 @@ def verify(zabbix):
     with zabbix.http.open(zabbix.url + "/index.php", login, timeout=15) as response:
         response.read()
     events = zabbix.events()
+    def verify_native_order(event):
+        url = zabbix.url + '/tr_events.php?' + urllib.parse.urlencode({
+            'triggerid': event['objectid'], 'eventid': event['eventid']})
+        with zabbix.http.open(url, timeout=20) as response:
+            native = NativeEventList(response.read().decode())
+        matching = [entry for entry in events if entry['objectid'] == event['objectid']
+            and int(entry['eventid']) <= int(event['eventid'])]
+        expected = sorted(matching, key=lambda entry: (int(entry['clock']), int(entry['eventid'])), reverse=True)[:20]
+        assert native.ids == [entry['eventid'] for entry in expected], 'Native previous-20 list must remain chronological'
+
     def load_timeline(event):
         first = Timeline(zabbix.tab(event["eventid"], "timeline")["body"])
         ids, highlighted, timeline = list(first.ids), list(first.highlighted), first.more
@@ -207,12 +241,17 @@ def verify(zabbix):
         assert ids == [entry["eventid"] for entry in sorted(matching, key=timeline_order)], ("Timeline order", name)
         oldest = min(matching, key=lambda entry: int(entry["eventid"]))
         assert load_timeline(oldest)[1] == ids, ("Older problem must include newer occurrences", name)
+        verify_native_order(event)
+        verify_native_order(oldest)
         for period in ['3', '6', '12']:
             summary = zabbix.tab(event["eventid"], 'monthly', comparison_period=period)
             assert Timeline(summary['body']).monthly_count == count, ("Monthly period", name, period)
             assert 'data-timeline-event' not in summary['body'], "Period changes must return only the comparison"
         patterns = zabbix.tab(event["eventid"], "patterns")
         assert patterns["pattern_data"]["total"] == count, ("Patterns", name, patterns)
+        older_patterns = zabbix.tab(oldest['eventid'], 'patterns')['pattern_data']
+        expected_patterns = sum(older_patterns['fromTs'] <= int(entry['clock']) <= older_patterns['toTs'] for entry in matching)
+        assert older_patterns['total'] == expected_patterns, ('Older problem patterns must include newer occurrences', name)
         print(f"Verified {name}: Recurrences={count}, Timeline={len(ids)}, Monthly Comparison={count}, Time Patterns={count}")
 
 

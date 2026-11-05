@@ -100,7 +100,10 @@ class ApiFixture {
                 if (!isset($options['eventids'])) {
                     if (API::$history === false) return false;
                     return array_values(array_filter(API::$history, static function ($event) use ($options) {
-                        return !isset($options['filter']['name']) || $event['name'] === $options['filter']['name'];
+                        return (!isset($options['filter']['name']) || $event['name'] === $options['filter']['name'])
+                            && (!isset($options['objectids']) || $event['objectid'] === $options['objectids'])
+                            && (!isset($options['time_from']) || $event['clock'] >= $options['time_from'])
+                            && (!isset($options['time_till']) || $event['clock'] <= $options['time_till']);
                     }));
                 }
                 if (in_array('2', array_map('strval', (array) $options['eventids']), true)) {
@@ -436,6 +439,30 @@ foreach (['patterns', 'timeline'] as $tab) {
     check(isset(json_decode($failed->response->getData()['main_block'], true)['error']), 'Range failures must remain retryable errors');
     API::$history = [];
 }
+// Opening an older problem must not truncate recent pattern data at that problem's start.
+$saved_event = API::$event;
+$now = time();
+API::$event['clock'] = $now - SEC_PER_HOUR;
+$pattern_event = ['objectid' => API::$event['objectid'], 'name' => API::$event['name']];
+API::$history = array_map(static function ($clock) use ($pattern_event) {
+    return $pattern_event + ['clock' => $clock];
+}, [$now - 2 * SEC_PER_HOUR, $now - SEC_PER_HOUR / 2, $now + SEC_PER_HOUR, 1]);
+API::$history[] = array_replace($pattern_event, ['clock' => $now - 60, 'name' => 'Another event ID']);
+API::$history[] = array_replace($pattern_event, ['clock' => $now - 60, 'objectid' => '8']);
+foreach ([API::$event['clock'], 1] as $opened_clock) {
+    API::$event['clock'] = $opened_clock;
+    API::$calls = [];
+    $patterns = new ProblemControllerFixture(['eventid' => '1', 'tab' => 'patterns']);
+    $patterns->run();
+    check(array_column($patterns->response->getData()['pattern_events'], 'clock')
+        === [$now - 2 * SEC_PER_HOUR, $now - SEC_PER_HOUR / 2],
+        'Pattern presets include newer matching occurrences and exclude future, old and unrelated events');
+    check(count(API::$calls) === 2 && API::$calls[1][1]['output'] === ['clock'],
+        'Pattern range changes retain one permission-checked timestamp query and skip unrelated tab data');
+}
+API::$event = $saved_event;
+API::$history = [];
+
 // Monthly summaries transfer counts only and changing their period skips Timeline pagination.
 $saved_event = API::$event;
 $comparison_timezone = date_default_timezone_get();

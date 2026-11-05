@@ -3,7 +3,7 @@
 require_once __DIR__.'/../../includes/PatternData.php';
 $timeline = $data['pattern_timeline'];
 $pattern_data = \Modules\AnalistProblem\PatternData::build($pattern_events,
-    $timeline['from_ts'], $timeline['to_ts'], (int) $event['clock']);
+    $timeline['from_ts'], $timeline['to_ts'], $timeline['to_ts']);
 $weekdays = [_('Sunday'), _('Monday'), _('Tuesday'), _('Wednesday'), _('Thursday'), _('Friday'), _('Saturday')];
 $hour_labels = [];
 $use_12h = strpos(TIME_FORMAT, 'A') !== false || strpos(TIME_FORMAT, 'a') !== false;
@@ -30,7 +30,7 @@ $time_patterns_div->addItem(createAnalistCalendarControls($timeline, 'pattern'))
 $time_patterns_div->addItem((new CTag('p', true, [
     zbx_date2str(DATE_TIME_FORMAT_SECONDS, $timeline['from_ts']).' – '
         .zbx_date2str(DATE_TIME_FORMAT_SECONDS, $timeline['to_ts']).' · '.date_default_timezone_get(),
-    $timeline['period'] === 'custom' ? '' : ' · '._('Period ends at problem start')
+    $timeline['period'] === 'custom' ? '' : ' · '._('Period ends now')
 ]))->addClass('mnz-drilldown-hint'));
 $time_patterns_div->addItem((new CDiv([
     (new CSpan())->addClass('mnz-filter-label')->setAttribute('data-pattern-filter-label', ''),

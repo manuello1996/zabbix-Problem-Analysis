@@ -173,10 +173,13 @@ $pattern_range = static function (array $options, string $date) use ($controller
     $validated_input->setValue($controller, $options);
     return $pattern_method->invoke($controller, ['clock' => strtotime($date)]);
 };
-foreach (['1' => '2026-03-01', '3' => '2026-01-01', '6' => '2025-10-01', '12' => '2025-04-01'] as $preset => $start) {
-    $range = $pattern_range(['pattern_period' => (string) $preset], '2026-03-31 12:00:00');
-    if ($range['from_ts'] !== strtotime($start) || $range['to_ts'] !== strtotime('2026-03-31 12:00:00')) {
-        throw new RuntimeException('Pattern presets must anchor calendar months at problem start');
+foreach (['1', '3', '6', '12'] as $preset) {
+    $before = time();
+    $range = $pattern_range(['pattern_period' => $preset], '2001-03-31 12:00:00');
+    $after = time();
+    $start = strtotime('-'.((int) $preset - 1).' months', strtotime(date('Y-m-01 00:00:00', $range['to_ts'])));
+    if ($range['from_ts'] !== $start || $range['to_ts'] < $before || $range['to_ts'] > $after) {
+        throw new RuntimeException('Pattern presets must cover calendar months through now regardless of the opened event.');
     }
 }
 $range = $pattern_range(['pattern_period' => 'custom', 'pattern_from' => '2026-03-29 01:30:00',
